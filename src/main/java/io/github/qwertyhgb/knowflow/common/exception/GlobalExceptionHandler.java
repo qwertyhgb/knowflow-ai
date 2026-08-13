@@ -53,7 +53,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<Result<Void>> handleBusinessException(BusinessException ex) {
         ErrorCode errorCode = ex.getErrorCode();
-        log.warn("Business exception: code={}, message={}", errorCode.getCode(), ex.getMessage());
+        log.warn("event=business_exception code={}", errorCode.getCode());
         return failure(errorCode, ex.getMessage());
     }
 
@@ -62,7 +62,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Result<Void>> handleException(Exception ex) {
-        log.error("Unexpected exception", ex);
+        log.error("event=unexpected_exception", ex);
         return failure(ErrorCode.INTERNAL_ERROR);
     }
 
@@ -78,7 +78,7 @@ public class GlobalExceptionHandler {
                 .map(fieldError -> fieldError.getDefaultMessage())
                 .filter(Objects::nonNull)
                 .orElse("请求参数校验失败");
-        log.warn("Validation failed: {}", message);
+        log.warn("event=request_body_validation_failed errorCount={}", ex.getErrorCount());
         return failure(ErrorCode.INVALID_PARAMETER, message);
     }
 
@@ -94,7 +94,7 @@ public class GlobalExceptionHandler {
                 .map(resolvableError -> resolvableError.getDefaultMessage())
                 .filter(Objects::nonNull)
                 .orElse("请求参数校验失败");
-        log.warn("Method validation failed: {}", message);
+        log.warn("event=method_validation_failed resultCount={}", ex.getParameterValidationResults().size());
         return failure(ErrorCode.INVALID_PARAMETER, message);
     }
 
@@ -103,7 +103,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<Result<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        log.warn("Parameter type mismatch: parameter={}, requiredType={}",
+        log.warn("event=parameter_type_mismatch parameter={} requiredType={}",
                 ex.getName(), ex.getRequiredType() == null ? "unknown" : ex.getRequiredType().getSimpleName());
         return failure(ErrorCode.INVALID_PARAMETER, "请求参数类型错误");
     }
@@ -113,7 +113,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Result<Void>> handleHttpMessageNotReadable(HttpMessageNotReadableException ex) {
-        log.warn("Request body is missing or malformed");
+        log.warn("event=request_body_not_readable");
         return failure(ErrorCode.INVALID_PARAMETER, "请求体格式错误或缺失");
     }
 
@@ -123,7 +123,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<Result<Void>> handleMissingParameter(MissingServletRequestParameterException ex) {
         String message = "缺少请求参数：" + ex.getParameterName();
-        log.warn("Missing request parameter: {}", ex.getParameterName());
+        log.warn("event=request_parameter_missing parameter={}", ex.getParameterName());
         return failure(ErrorCode.INVALID_PARAMETER, message);
     }
 
@@ -132,32 +132,32 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(ServletRequestBindingException.class)
     public ResponseEntity<Result<Void>> handleServletRequestBinding(ServletRequestBindingException ex) {
-        log.warn("Servlet request binding failed: exceptionType={}", ex.getClass().getSimpleName());
+        log.warn("event=request_binding_failed exceptionType={}", ex.getClass().getSimpleName());
         return failure(ErrorCode.INVALID_PARAMETER, "请求参数缺失或无效");
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<Result<Void>> handleNoResourceFound(NoResourceFoundException ex) {
-        log.debug("Resource not found: {} {}", ex.getHttpMethod(), ex.getResourcePath());
+        log.debug("event=resource_not_found method={} path={}", ex.getHttpMethod(), ex.getResourcePath());
         return failure(ErrorCode.NOT_FOUND);
     }
 
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<Result<Void>> handleMethodNotSupported(HttpRequestMethodNotSupportedException ex) {
-        log.warn("Request method not supported: method={}", ex.getMethod());
+        log.warn("event=request_method_not_supported method={}", ex.getMethod());
         return failure(ErrorCode.METHOD_NOT_ALLOWED);
     }
 
     @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
     public ResponseEntity<Result<Void>> handleMediaTypeNotAcceptable(HttpMediaTypeNotAcceptableException ex) {
-        log.warn("No acceptable response media type");
+        log.warn("event=response_media_type_not_acceptable");
         // 客户端明确拒绝 JSON 时，继续写统一 JSON 错误体会再次触发 406，因此只返回状态码。
         return ResponseEntity.status(ErrorCode.NOT_ACCEPTABLE.getHttpStatus()).build();
     }
 
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     public ResponseEntity<Result<Void>> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
-        log.warn("Request media type not supported: contentType={}", ex.getContentType());
+        log.warn("event=request_media_type_not_supported contentType={}", ex.getContentType());
         return failure(ErrorCode.UNSUPPORTED_MEDIA_TYPE);
     }
 

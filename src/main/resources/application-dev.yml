@@ -1,0 +1,17 @@
+spring:
+  config:
+    activate:
+      on-profile: dev
+  output:
+    ansi:
+      enabled: always
+
+logging:
+  level:
+    io.github.qwertyhgb.knowflow: DEBUG
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

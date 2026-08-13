@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: knowflow-ai
+  profiles:
+    default: dev
+  jackson:
+    time-zone: UTC
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
+server:
+  shutdown: graceful
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"
