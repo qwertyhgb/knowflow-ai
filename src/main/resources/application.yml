@@ -17,4 +17,8 @@ mybatis-plus:
 
 knowflow:
   auth:
+    # Token 有效期
     token-ttl: 7d
+    # 自动续期阈值：剩余 TTL 不足此值时，认证流程顺带刷新 TTL。
+    # 避免每次请求都写 Redis，仅在临近过期时触发。
+    token-renew-threshold: 1d

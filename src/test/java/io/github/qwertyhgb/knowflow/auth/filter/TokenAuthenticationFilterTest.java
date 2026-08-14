@@ -75,4 +75,47 @@ class TokenAuthenticationFilterTest {
         assertEquals(99L, SecurityContextHolder.getContext().getAuthentication().getPrincipal());
         verify(tokenService, never()).resolveUserId(org.mockito.ArgumentMatchers.anyString());
     }
+
+    @Test
+    void shouldRenewTokenAfterSuccessfulAuthentication() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader("Authorization", "Bearer valid-token");
+
+        new TokenAuthenticationFilter(tokenService)
+                .doFilter(request, new MockHttpServletResponse(), (servletRequest, servletResponse) -> { });
+
+        verify(tokenService).renewToken("valid-token");
+    }
+
+    @Test
+    void shouldNotRenewInvalidToken() throws Exception {
+        when(tokenService.resolveUserId("invalid-token")).thenReturn(Optional.empty());
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader("Authorization", "Bearer invalid-token");
+
+        new TokenAuthenticationFilter(tokenService)
+                .doFilter(request, new MockHttpServletResponse(), (servletRequest, servletResponse) -> { });
+
+        assertNull(SecurityContextHolder.getContext().getAuthentication());
+        verify(tokenService, never()).renewToken(org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void shouldContinueRequestWhenRenewTokenFails() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
+        org.mockito.Mockito.doThrow(new RuntimeException("Redis down"))
+                .when(tokenService).renewToken("valid-token");
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader("Authorization", "Bearer valid-token");
+        AtomicInteger chainInvocations = new AtomicInteger();
+        FilterChain chain = (servletRequest, servletResponse) -> chainInvocations.incrementAndGet();
+
+        new TokenAuthenticationFilter(tokenService)
+                .doFilter(request, new MockHttpServletResponse(), chain);
+
+        // 认证仍应成功建立，主请求流程不应被续期失败影响。
+        assertEquals(7L, SecurityContextHolder.getContext().getAuthentication().getPrincipal());
+        assertEquals(1, chainInvocations.get());
+    }
 }

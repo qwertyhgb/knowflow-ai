@@ -6,6 +6,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -19,7 +20,11 @@ import java.util.List;
  *
  * <p>继承 {@link OncePerRequestFilter}，保证一次请求分派只执行一次。
  * 仅当安全上下文中尚无认证信息时才尝试认证，避免覆盖其他认证机制建立的上下文。</p>
+ *
+ * <p>认证成功后会顺带调用 {@link TokenService#renewToken(String)} 续期，
+ * 实现「活跃用户保持登录」。续期失败不影响主流程，仅记 warn 日志。</p>
  */
+@Slf4j
 public class TokenAuthenticationFilter extends OncePerRequestFilter {
 
     private final TokenService tokenService;
@@ -40,8 +45,22 @@ public class TokenAuthenticationFilter extends OncePerRequestFilter {
                 SecurityContext context = SecurityContextHolder.createEmptyContext();
                 context.setAuthentication(authentication);
                 SecurityContextHolder.setContext(context);
+                // 续期是顺带行为，Redis 抖动不应影响认证主流程。
+                renewTokenSafely(token);
             });
         }
         chain.doFilter(request, response);
+    }
+
+    /**
+     * 续期失败仅记日志，不抛异常，避免影响已建立的认证状态与主请求流程。
+     */
+    private void renewTokenSafely(String token) {
+        try {
+            tokenService.renewToken(token);
+        } catch (RuntimeException ex) {
+            // 不记录异常 message，避免把连接信息等非白名单内容写入日志。
+            log.warn("event=token_renew_failed errorType={}", ex.getClass().getSimpleName());
+        }
     }
 }
