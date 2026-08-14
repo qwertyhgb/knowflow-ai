@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.github.qwertyhgb.knowflow.auth.token.TokenService;
 import io.github.qwertyhgb.knowflow.common.exception.BusinessException;
 import io.github.qwertyhgb.knowflow.common.exception.ErrorCode;
+import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserLoginRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserProfileUpdateRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserRegisterRequest;
@@ -257,6 +258,54 @@ public class UserServiceImpl implements UserService {
     public void logout(Long userId, String token) {
         tokenService.revokeToken(token);
         log.info("event=user_logged_out userId={}", userId);
+    }
+
+    /**
+     * 修改当前用户密码。
+     *
+     * <p><strong>处理流程：</strong></p>
+     * <ol>
+     *   <li>按 ID 查用户，不存在则抛 {@link ErrorCode#NOT_FOUND}。</li>
+     *   <li>校验当前密码，错误时抛 {@link ErrorCode#INVALID_PASSWORD}。
+     *       此处用户已登录，无需像登录那样防范账号枚举，故用专用错误码区分场景。</li>
+     *   <li>新密码与当前密码相同则跳过更新，避免无意义的哈希计算与写库。</li>
+     *   <li>构造仅含主键、新密码哈希、更新时间的局部实体执行更新，
+     *       避免把查询出的 email、status 等字段意外回写。</li>
+     * </ol>
+     *
+     * @param userId  当前登录用户 ID
+     * @param request 密码修改请求参数
+     */
+    @Override
+    public void changePassword(Long userId, UserChangePasswordRequest request) {
+        User user = userMapper.selectById(userId);
+        if (user == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND);
+        }
+
+        String currentPassword = request.getCurrentPassword();
+        if (!passwordEncoder.matches(currentPassword, user.getPasswordHash())) {
+            throw new BusinessException(ErrorCode.INVALID_PASSWORD);
+        }
+
+        String newPassword = request.getNewPassword();
+        // 新密码与当前密码相同则跳过，避免无意义的哈希计算与写库。
+        if (newPassword.equals(currentPassword)) {
+            return;
+        }
+
+        Instant updatedAt = clock.instant();
+        User update = new User();
+        update.setId(userId);
+        update.setPasswordHash(passwordEncoder.encode(newPassword));
+        update.setUpdatedAt(updatedAt);
+
+        int updatedRows = userMapper.updateById(update);
+        if (updatedRows != 1) {
+            throw new IllegalStateException("Expected one updated user row, but got " + updatedRows);
+        }
+
+        log.info("event=user_password_changed userId={}", userId);
     }
 
     /**

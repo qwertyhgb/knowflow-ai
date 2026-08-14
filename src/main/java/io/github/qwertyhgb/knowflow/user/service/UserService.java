@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.user.service;
 
+import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserLoginRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserProfileUpdateRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserRegisterRequest;
@@ -43,6 +44,14 @@ public interface UserService {
      * @return 修改后的用户视图
      */
     UserVO updateProfile(Long userId, UserProfileUpdateRequest request);
+
+    /**
+     * 修改当前用户密码：校验当前密码后将新密码哈希入库。
+     *
+     * @param userId  当前登录用户 ID
+     * @param request 密码修改请求参数
+     */
+    void changePassword(Long userId, UserChangePasswordRequest request);
 
     /**
      * 用户登出：使指定 Token 失效。

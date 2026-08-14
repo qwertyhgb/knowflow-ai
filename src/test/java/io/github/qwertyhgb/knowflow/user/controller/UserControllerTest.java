@@ -3,6 +3,7 @@ package io.github.qwertyhgb.knowflow.user.controller;
 import io.github.qwertyhgb.knowflow.auth.token.TokenService;
 import io.github.qwertyhgb.knowflow.common.exception.BusinessException;
 import io.github.qwertyhgb.knowflow.common.exception.ErrorCode;
+import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserLoginRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserProfileUpdateRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserRegisterRequest;
@@ -26,6 +27,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.never;
@@ -33,6 +35,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -269,6 +272,87 @@ class UserControllerTest {
                 .andExpect(jsonPath("$.message").value("未认证或登录已过期"));
 
         verifyNoInteractions(userService);
+    }
+
+    @Test
+    void shouldChangePasswordWhenCurrentPasswordMatches() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+
+        mockMvc.perform(put("/api/users/me/password")
+                        .header("Authorization", "Bearer valid-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "currentPassword": "Password123!",
+                                  "newPassword": "NewPassword456!"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("SUCCESS"))
+                .andExpect(jsonPath("$.message").value("success"))
+                .andExpect(jsonPath("$.data").doesNotExist());
+
+        verify(userService).changePassword(org.mockito.ArgumentMatchers.eq(1L),
+                any(UserChangePasswordRequest.class));
+    }
+
+    @Test
+    void shouldReturnBadRequestWhenCurrentPasswordIsWrong() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        doThrow(new BusinessException(ErrorCode.INVALID_PASSWORD))
+                .when(userService).changePassword(any(), any());
+
+        mockMvc.perform(put("/api/users/me/password")
+                        .header("Authorization", "Bearer valid-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "currentPassword": "WrongPassword",
+                                  "newPassword": "NewPassword456!"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PASSWORD"))
+                .andExpect(jsonPath("$.message").value("当前密码错误"))
+                .andExpect(jsonPath("$.data").doesNotExist());
+    }
+
+    @Test
+    void shouldRejectChangePasswordWithBlankNewPassword() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+
+        mockMvc.perform(put("/api/users/me/password")
+                        .header("Authorization", "Bearer valid-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "currentPassword": "Password123!",
+                                  "newPassword": " "
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"));
+
+        verify(userService, never()).changePassword(any(), any());
+    }
+
+    @Test
+    void shouldRejectChangePasswordWithTooLongCurrentPassword() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+
+        mockMvc.perform(put("/api/users/me/password")
+                        .header("Authorization", "Bearer valid-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "currentPassword": "Password12345678901234567890!",
+                                  "newPassword": "NewPassword456!"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"));
+
+        verify(userService, never()).changePassword(any(), any());
     }
 
     @Test

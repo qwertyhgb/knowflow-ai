@@ -2,6 +2,7 @@ package io.github.qwertyhgb.knowflow.user.controller;
 
 import io.github.qwertyhgb.knowflow.auth.token.BearerTokenExtractor;
 import io.github.qwertyhgb.knowflow.common.response.Result;
+import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserLoginRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserProfileUpdateRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserRegisterRequest;
@@ -14,6 +15,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -64,6 +66,17 @@ public class UserController {
                                         @Valid @RequestBody UserProfileUpdateRequest request) {
         Long userId = (Long) authentication.getPrincipal();
         return Result.success(userService.updateProfile(userId, request));
+    }
+
+    /**
+     * 修改当前登录用户密码。
+     */
+    @PutMapping("/me/password")
+    public Result<Void> changePassword(Authentication authentication,
+                                       @Valid @RequestBody UserChangePasswordRequest request) {
+        Long userId = (Long) authentication.getPrincipal();
+        userService.changePassword(userId, request);
+        return Result.success();
     }
 
     /**

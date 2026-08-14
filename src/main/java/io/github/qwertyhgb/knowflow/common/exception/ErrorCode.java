@@ -61,7 +61,10 @@ public enum ErrorCode {
     INVALID_CREDENTIALS("INVALID_CREDENTIALS", "邮箱或密码错误", HttpStatus.UNAUTHORIZED),
 
     /** 登录时账号被禁用，凭证校验通过后才返回，固定 403。 */
-    USER_DISABLED("USER_DISABLED", "账号已被禁用", HttpStatus.FORBIDDEN);
+    USER_DISABLED("USER_DISABLED", "账号已被禁用", HttpStatus.FORBIDDEN),
+
+    /** 修改密码时当前密码错误。此场景下用户已登录，无需防范账号枚举，固定 400。 */
+    INVALID_PASSWORD("INVALID_PASSWORD", "当前密码错误", HttpStatus.BAD_REQUEST);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;

@@ -3,6 +3,7 @@ package io.github.qwertyhgb.knowflow.user.service.impl;
 import io.github.qwertyhgb.knowflow.auth.token.TokenService;
 import io.github.qwertyhgb.knowflow.common.exception.BusinessException;
 import io.github.qwertyhgb.knowflow.common.exception.ErrorCode;
+import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserLoginRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserProfileUpdateRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserRegisterRequest;
@@ -197,6 +198,66 @@ class UserServiceImplTest {
         verify(userMapper, never()).updateById(any(User.class));
     }
 
+    @Test
+    void shouldHashAndPersistNewPasswordWhenCurrentPasswordMatches() {
+        User existingUser = user(1L, "student@example.com", "hashed-password", UserStatus.NORMAL);
+        when(userMapper.selectById(1L)).thenReturn(existingUser);
+        when(passwordEncoder.matches("Password123!", "hashed-password")).thenReturn(true);
+        when(passwordEncoder.encode("NewPassword456!")).thenReturn("new-hashed-password");
+        when(userMapper.updateById(any(User.class))).thenReturn(1);
+
+        userService.changePassword(1L, changePasswordRequest("Password123!", "NewPassword456!"));
+
+        ArgumentCaptor<User> updateCaptor = ArgumentCaptor.forClass(User.class);
+        verify(userMapper).updateById(updateCaptor.capture());
+        User update = updateCaptor.getValue();
+        assertEquals(1L, update.getId());
+        assertEquals("new-hashed-password", update.getPasswordHash());
+        assertEquals(NOW, update.getUpdatedAt());
+        assertNull(update.getEmail());
+        assertNull(update.getNickname());
+        assertNull(update.getStatus());
+        assertNull(update.getCreatedAt());
+    }
+
+    @Test
+    void shouldRejectChangePasswordWhenCurrentPasswordIsWrong() {
+        User existingUser = user(1L, "student@example.com", "hashed-password", UserStatus.NORMAL);
+        when(userMapper.selectById(1L)).thenReturn(existingUser);
+        when(passwordEncoder.matches("WrongPassword", "hashed-password")).thenReturn(false);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> userService.changePassword(1L, changePasswordRequest("WrongPassword", "NewPassword456!")));
+
+        assertEquals(ErrorCode.INVALID_PASSWORD, exception.getErrorCode());
+        verify(passwordEncoder, never()).encode(any());
+        verify(userMapper, never()).updateById(any(User.class));
+    }
+
+    @Test
+    void shouldRejectChangePasswordWhenUserDoesNotExist() {
+        when(userMapper.selectById(99L)).thenReturn(null);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> userService.changePassword(99L, changePasswordRequest("Password123!", "NewPassword456!")));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        verify(passwordEncoder, never()).matches(any(CharSequence.class), any(String.class));
+        verify(userMapper, never()).updateById(any(User.class));
+    }
+
+    @Test
+    void shouldSkipUpdateWhenNewPasswordEqualsCurrentPassword() {
+        User existingUser = user(1L, "student@example.com", "hashed-password", UserStatus.NORMAL);
+        when(userMapper.selectById(1L)).thenReturn(existingUser);
+        when(passwordEncoder.matches("Password123!", "hashed-password")).thenReturn(true);
+
+        userService.changePassword(1L, changePasswordRequest("Password123!", "Password123!"));
+
+        verify(passwordEncoder, never()).encode(any());
+        verify(userMapper, never()).updateById(any(User.class));
+    }
+
     private UserRegisterRequest request(String email, String password, String nickname) {
         UserRegisterRequest request = new UserRegisterRequest();
         request.setEmail(email);
@@ -215,6 +276,13 @@ class UserServiceImplTest {
     private UserProfileUpdateRequest profileRequest(String nickname) {
         UserProfileUpdateRequest request = new UserProfileUpdateRequest();
         request.setNickname(nickname);
+        return request;
+    }
+
+    private UserChangePasswordRequest changePasswordRequest(String currentPassword, String newPassword) {
+        UserChangePasswordRequest request = new UserChangePasswordRequest();
+        request.setCurrentPassword(currentPassword);
+        request.setNewPassword(newPassword);
         return request;
     }
 
