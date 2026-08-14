@@ -2,19 +2,18 @@ package io.github.qwertyhgb.knowflow.common.exception;
 
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -23,7 +22,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(controllers = GlobalExceptionHandlerTest.TestController.class)
+@AutoConfigureMockMvc(addFilters = false)
 @Import(GlobalExceptionHandlerTest.TestController.class)
+@ActiveProfiles("test")
 class GlobalExceptionHandlerTest {
 
     @Autowired
@@ -58,22 +59,6 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    void shouldReturnValidationMessageForInvalidMethodParameter() throws Exception {
-        mockMvc.perform(get("/_test/page").param("page", "0"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"))
-                .andExpect(jsonPath("$.message").value("页码不能小于 1"));
-    }
-
-    @Test
-    void shouldHandleParameterTypeMismatch() throws Exception {
-        mockMvc.perform(get("/_test/page").param("page", "not-a-number"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"))
-                .andExpect(jsonPath("$.message").value("请求参数类型错误"));
-    }
-
-    @Test
     void shouldHandleMalformedRequestBody() throws Exception {
         mockMvc.perform(post("/_test/body")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -81,22 +66,6 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"))
                 .andExpect(jsonPath("$.message").value("请求体格式错误或缺失"));
-    }
-
-    @Test
-    void shouldIdentifyMissingRequestParameter() throws Exception {
-        mockMvc.perform(get("/_test/page"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"))
-                .andExpect(jsonPath("$.message").value("缺少请求参数：page"));
-    }
-
-    @Test
-    void shouldHandleMissingRequestHeader() throws Exception {
-        mockMvc.perform(get("/_test/header"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"))
-                .andExpect(jsonPath("$.message").value("请求参数缺失或无效"));
     }
 
     @Test
@@ -108,7 +77,7 @@ class GlobalExceptionHandlerTest {
 
     @Test
     void shouldKeepMethodNotAllowedStatus() throws Exception {
-        mockMvc.perform(post("/_test/header"))
+        mockMvc.perform(post("/_test/business"))
                 .andExpect(status().isMethodNotAllowed())
                 .andExpect(jsonPath("$.code").value("METHOD_NOT_ALLOWED"));
     }
@@ -120,14 +89,6 @@ class GlobalExceptionHandlerTest {
                         .content("name=knowflow"))
                 .andExpect(status().isUnsupportedMediaType())
                 .andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"));
-    }
-
-    @Test
-    void shouldKeepNotAcceptableStatusWithoutForcingJsonBody() throws Exception {
-        mockMvc.perform(get("/_test/header")
-                        .header("X-Tenant-Id", "tenant-1")
-                        .accept(MediaType.APPLICATION_XML))
-                .andExpect(status().isNotAcceptable());
     }
 
     @RestController
@@ -148,16 +109,6 @@ class GlobalExceptionHandlerTest {
             return Result.success();
         }
 
-        @GetMapping("/_test/page")
-        public Result<Void> validatePage(
-                @RequestParam @Min(value = 1, message = "页码不能小于 1") Integer page) {
-            return Result.success();
-        }
-
-        @GetMapping("/_test/header")
-        public Result<Void> requireHeader(@RequestHeader("X-Tenant-Id") String tenantId) {
-            return Result.success();
-        }
     }
 
     public record TestRequest(@NotBlank(message = "名称不能为空") String name) {

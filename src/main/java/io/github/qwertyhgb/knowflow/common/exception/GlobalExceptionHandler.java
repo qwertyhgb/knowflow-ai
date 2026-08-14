@@ -4,16 +4,11 @@ import io.github.qwertyhgb.knowflow.common.response.Result;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
-import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
-import org.springframework.web.bind.MissingServletRequestParameterException;
-import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.method.annotation.HandlerMethodValidationException;
-import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Objects;
@@ -27,18 +22,15 @@ import java.util.Objects;
  *       响应体使用 {@code Result.failure(errorCode)}，把结构化的 code / message 透传给前端。</li>
  *   <li>{@link MethodArgumentNotValidException} —— 请求体参数校验失败，固定 400，使用
  *       {@link ErrorCode#INVALID_PARAMETER}，取第一个字段的校验错误信息作为 message。</li>
- *   <li>{@link HandlerMethodValidationException} —— 方法级参数校验失败（如 {@code @RequestParam} 上的约束），
- *       固定 400，使用 {@link ErrorCode#INVALID_PARAMETER}，取第一个校验错误信息作为 message。</li>
- *   <li>{@link MethodArgumentTypeMismatchException} —— 参数类型转换失败（如 age=abc），固定 400，
- *       使用 {@link ErrorCode#INVALID_PARAMETER}，返回通用文案。</li>
  *   <li>{@link HttpMessageNotReadableException} —— 请求体无法读取（JSON 格式错误 / 请求体为空 /
  *       无法反序列化），固定 400，使用 {@link ErrorCode#INVALID_PARAMETER}，返回通用文案。</li>
- *   <li>{@link MissingServletRequestParameterException} —— 必需的请求参数缺失，固定 400，
- *       使用 {@link ErrorCode#INVALID_PARAMETER}，message 附带缺失的参数名。</li>
- *   <li>Spring MVC 的常见 4xx 异常 —— 保留正确 HTTP 状态，避免被兜底处理误报成 500。</li>
+ *   <li>当前业务会遇到的常见 4xx 异常 —— 404、405、415 保留正确 HTTP 状态。</li>
  *   <li>{@link Exception} —— 兜底处理所有未捕获异常，固定 500，记录完整堆栈，对外只返回通用文案，
  *       不向客户端暴露未知异常的真实 message（可能含敏感信息或实现细节）。</li>
  * </ul>
+ *
+ * <p>学习版不提前处理尚未出现的参数类型、方法级校验或自定义 Header 异常；
+ * 等真实接口用到相应能力时，再添加对应的 {@code @ExceptionHandler}。</p>
  */
 @Slf4j
 @RestControllerAdvice
@@ -83,57 +75,12 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 方法级参数校验失败（如 {@code @RequestParam} / {@code @PathVariable} 上的约束）：
-     * 固定 400，取第一个校验错误信息作为 message 返回。
-     */
-    @ExceptionHandler(HandlerMethodValidationException.class)
-    public ResponseEntity<Result<Void>> handleHandlerMethodValidation(HandlerMethodValidationException ex) {
-        String message = ex.getParameterValidationResults().stream()
-                .flatMap(result -> result.getResolvableErrors().stream())
-                .findFirst()
-                .map(resolvableError -> resolvableError.getDefaultMessage())
-                .filter(Objects::nonNull)
-                .orElse("请求参数校验失败");
-        log.warn("event=method_validation_failed resultCount={}", ex.getParameterValidationResults().size());
-        return failure(ErrorCode.INVALID_PARAMETER, message);
-    }
-
-    /**
-     * 参数类型转换失败（如 {@code age=abc} 无法转成 Integer）：固定 400，返回通用文案。
-     */
-    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
-    public ResponseEntity<Result<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        log.warn("event=parameter_type_mismatch parameter={} requiredType={}",
-                ex.getName(), ex.getRequiredType() == null ? "unknown" : ex.getRequiredType().getSimpleName());
-        return failure(ErrorCode.INVALID_PARAMETER, "请求参数类型错误");
-    }
-
-    /**
      * 请求体无法读取（JSON 格式错误 / 请求体为空 / 无法反序列化）：固定 400，返回通用文案。
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Result<Void>> handleHttpMessageNotReadable(HttpMessageNotReadableException ex) {
         log.warn("event=request_body_not_readable");
         return failure(ErrorCode.INVALID_PARAMETER, "请求体格式错误或缺失");
-    }
-
-    /**
-     * 必需的请求参数缺失：固定 400，message 附带缺失的参数名。
-     */
-    @ExceptionHandler(MissingServletRequestParameterException.class)
-    public ResponseEntity<Result<Void>> handleMissingParameter(MissingServletRequestParameterException ex) {
-        String message = "缺少请求参数：" + ex.getParameterName();
-        log.warn("event=request_parameter_missing parameter={}", ex.getParameterName());
-        return failure(ErrorCode.INVALID_PARAMETER, message);
-    }
-
-    /**
-     * 请求头、Cookie 等请求值缺失或不符合绑定条件。
-     */
-    @ExceptionHandler(ServletRequestBindingException.class)
-    public ResponseEntity<Result<Void>> handleServletRequestBinding(ServletRequestBindingException ex) {
-        log.warn("event=request_binding_failed exceptionType={}", ex.getClass().getSimpleName());
-        return failure(ErrorCode.INVALID_PARAMETER, "请求参数缺失或无效");
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
@@ -146,13 +93,6 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Void>> handleMethodNotSupported(HttpRequestMethodNotSupportedException ex) {
         log.warn("event=request_method_not_supported method={}", ex.getMethod());
         return failure(ErrorCode.METHOD_NOT_ALLOWED);
-    }
-
-    @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
-    public ResponseEntity<Result<Void>> handleMediaTypeNotAcceptable(HttpMediaTypeNotAcceptableException ex) {
-        log.warn("event=response_media_type_not_acceptable");
-        // 客户端明确拒绝 JSON 时，继续写统一 JSON 错误体会再次触发 406，因此只返回状态码。
-        return ResponseEntity.status(ErrorCode.NOT_ACCEPTABLE.getHttpStatus()).build();
     }
 
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)

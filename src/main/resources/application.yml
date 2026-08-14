@@ -5,12 +5,16 @@ spring:
     default: dev
   jackson:
     time-zone: UTC
-  lifecycle:
-    timeout-per-shutdown-phase: 20s
-
-server:
-  shutdown: graceful
-
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"
+
+mybatis-plus:
+  global-config:
+    banner: false
+  configuration:
+    map-underscore-to-camel-case: true
+
+knowflow:
+  auth:
+    token-ttl: 7d

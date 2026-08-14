@@ -5,6 +5,14 @@ spring:
   output:
     ansi:
       enabled: always
+  datasource:
+    url: jdbc:mysql://${KNOWFLOW_DB_HOST:localhost}:${KNOWFLOW_DB_PORT:3306}/${KNOWFLOW_DB_NAME:knowflow}?useUnicode=true&characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+    username: ${KNOWFLOW_DB_USERNAME:knowflow}
+    password: ${KNOWFLOW_DB_PASSWORD:knowflow_local_password}
+  data:
+    redis:
+      host: ${KNOWFLOW_REDIS_HOST:localhost}
+      port: ${KNOWFLOW_REDIS_PORT:6379}
 
 logging:
   level:

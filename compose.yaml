@@ -1,0 +1,23 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: knowflow-mysql
+    environment:
+      MYSQL_DATABASE: knowflow
+      MYSQL_USER: knowflow
+      MYSQL_PASSWORD: ${KNOWFLOW_DB_PASSWORD:-knowflow_local_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-knowflow_root_local_password}
+      TZ: UTC
+    ports:
+      - "${KNOWFLOW_DB_PORT:-3306}:3306"
+    volumes:
+      - knowflow-mysql-data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    container_name: knowflow-redis
+    ports:
+      - "${KNOWFLOW_REDIS_PORT:-6379}:6379"
+
+volumes:
+  knowflow-mysql-data:

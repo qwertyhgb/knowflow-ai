@@ -2,6 +2,14 @@ spring:
   config:
     activate:
       on-profile: prod
+  datasource:
+    url: ${KNOWFLOW_DB_URL}
+    username: ${KNOWFLOW_DB_USERNAME}
+    password: ${KNOWFLOW_DB_PASSWORD}
+  data:
+    redis:
+      host: ${KNOWFLOW_REDIS_HOST}
+      port: ${KNOWFLOW_REDIS_PORT:6379}
 
 logging:
   level:

@@ -16,7 +16,7 @@ public class OpenApiConfig {
         return new OpenAPI()
                 .info(new Info()
                         .title("KnowFlow API")
-                        .description("KnowFlow 企业级 AI 知识库 SaaS 服务接口文档")
+                        .description("KnowFlow Java 后端学习项目接口文档")
                         .version("v1"));
     }
 }

@@ -106,7 +106,7 @@ public final class PageResult<T> {
      * @throws IllegalArgumentException 当 {@code total} 为负、或 {@code pageNum} /
      *                                  {@code pageSize} 不大于 0 时
      */
-    private PageResult(List<T> records, long total, long pageNum, int pageSize) {
+    private PageResult(List<? extends T> records, long total, long pageNum, int pageSize) {
         // List.copyOf 会返回一个真正不可变的列表，同时拒绝 null 元素，
         // 既防止外部修改，也避免 null 元素混入导致下游遍历时出现空指针。
         this.records = List.copyOf(Objects.requireNonNull(records, "records must not be null"));
@@ -135,8 +135,8 @@ public final class PageResult<T> {
      *                                  不满足约束时
      */
     public static <T> PageResult<T> of(List<? extends T> records, long total, long pageNum, int pageSize) {
-        Objects.requireNonNull(records, "records must not be null");
-        return new PageResult<>(List.copyOf(records), total, pageNum, pageSize);
+        // 列表只在构造器中复制一次，所有创建入口共用同一套校验与不可变处理。
+        return new PageResult<>(records, total, pageNum, pageSize);
     }
 
     /**
