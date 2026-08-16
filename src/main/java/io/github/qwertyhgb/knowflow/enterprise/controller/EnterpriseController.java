@@ -9,6 +9,7 @@ import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseService;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseMemberVO;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseVO;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -74,9 +75,14 @@ public class EnterpriseController {
     }
 
     /**
-     * 更新企业名称（需企业 OWNER 或 ADMIN 角色）。
+     * 更新企业名称。
+     *
+     * <p>需要 {@code enterprise:update} 权限。该权限码由 {@code EnterpriseContextFilter}
+     * 从当前成员角色的角色-权限关联加载并注入 {@code Authentication} 的 authorities，
+     * 权限不足时在方法执行前抛 {@code AccessDeniedException} 并返回 403。</p>
      */
     @PutMapping("/{enterpriseId}")
+    @PreAuthorize("hasAuthority('enterprise:update')")
     public Result<EnterpriseVO> updateEnterprise(Authentication authentication,
                                                  @PathVariable Long enterpriseId,
                                                  @Valid @RequestBody EnterpriseUpdateRequest request) {
@@ -85,9 +91,13 @@ public class EnterpriseController {
     }
 
     /**
-     * 查询企业成员列表（需企业正常成员，ADMIN/MEMBER 均可）。
+     * 查询企业成员列表。
+     *
+     * <p>需要 {@code member:view} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
      */
     @GetMapping("/{enterpriseId}/members")
+    @PreAuthorize("hasAuthority('member:view')")
     public Result<List<EnterpriseMemberVO>> listMembers(Authentication authentication,
                                                         @PathVariable Long enterpriseId) {
         Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
@@ -99,8 +109,12 @@ public class EnterpriseController {
      *
      * <p>仅允许该企业 OWNER 或 ADMIN 操作——MEMBER 无权；
      * 管理员不能移除自己，也不能移除 OWNER。</p>
+     *
+     * <p>需要 {@code member:remove} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
      */
     @PostMapping("/{enterpriseId}/members/{targetUserId}/remove")
+    @PreAuthorize("hasAuthority('member:remove')")
     public Result<Void> removeMember(Authentication authentication,
                                      @PathVariable Long enterpriseId,
                                      @PathVariable Long targetUserId) {
@@ -129,8 +143,12 @@ public class EnterpriseController {
      * <p>仅允许该企业 OWNER 或 ADMIN 操作——MEMBER 无权；
      * 管理员不能修改自己的状态，也不能修改 OWNER 的状态。
      * 请求状态与当前状态相同时幂等返回，不触发更新。</p>
+     *
+     * <p>需要 {@code member:status} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
      */
     @PutMapping("/{enterpriseId}/members/{targetUserId}/status")
+    @PreAuthorize("hasAuthority('member:status')")
     public Result<EnterpriseMemberVO> updateMemberStatus(Authentication authentication,
                                                          @PathVariable Long enterpriseId,
                                                          @PathVariable Long targetUserId,

@@ -13,11 +13,11 @@ import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseDepartment;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseDepartmentStatus;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseDepartmentMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseMembershipChecker;
 import io.github.qwertyhgb.knowflow.enterprise.vo.DepartmentTreeVO;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.BeforeAll;
@@ -68,16 +68,19 @@ class DepartmentServiceImplTest {
 
     @BeforeEach
     void setUp() {
+        // 使用真实 checker（内部走 enterpriseMapper / enterpriseMemberMapper 两个 mock），
+        // 保持既有 exists / selectOne 桩的语义不变。
+        EnterpriseMembershipChecker membershipChecker =
+                new EnterpriseMembershipChecker(enterpriseMapper, enterpriseMemberMapper);
         departmentService = new DepartmentServiceImpl(
-                enterpriseMapper,
-                enterpriseMemberMapper,
                 enterpriseDepartmentMapper,
+                membershipChecker,
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
     void shouldCreateRootDepartmentAsOwner() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         when(enterpriseDepartmentMapper.insert(any(EnterpriseDepartment.class))).thenAnswer(invocation -> {
             EnterpriseDepartment department = invocation.getArgument(0);
             department.setId(100L);
@@ -103,7 +106,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldCreateChildDepartmentAsAdmin() {
-        allowManager(EnterpriseMemberRole.ADMIN);
+        allowActiveMember();
         EnterpriseDepartment parent = department(20L, 10L, null, "研发部");
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(parent);
 
@@ -123,24 +126,30 @@ class DepartmentServiceImplTest {
                 () -> departmentService.createDepartment(7L, 99L, request("研发部", null, 0)));
 
         assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
-        verify(enterpriseMemberMapper, never()).selectOne(any());
+        verify(enterpriseMemberMapper, never()).exists(any());
         verify(enterpriseDepartmentMapper, never()).insert(any(EnterpriseDepartment.class));
     }
 
     @Test
-    void shouldRejectPlainMember() {
-        allowManager(EnterpriseMemberRole.MEMBER);
+    void shouldAllowPlainMemberToCreateDepartment() {
+        // MEMBER 角色也能创建部门：管理权限由 Controller 的 @PreAuthorize 校验，
+        // Service 只保证成员身份，不再按角色拒绝。
+        allowActiveMember();
+        when(enterpriseDepartmentMapper.insert(any(EnterpriseDepartment.class))).thenAnswer(invocation -> {
+            EnterpriseDepartment department = invocation.getArgument(0);
+            department.setId(100L);
+            return 1;
+        });
 
-        BusinessException exception = assertThrows(BusinessException.class,
-                () -> departmentService.createDepartment(7L, 10L, request("研发部", null, 0)));
+        EnterpriseDepartment result = departmentService.createDepartment(7L, 10L, request("研发部", null, 0));
 
-        assertEquals(ErrorCode.FORBIDDEN, exception.getErrorCode());
-        verify(enterpriseDepartmentMapper, never()).insert(any(EnterpriseDepartment.class));
+        assertEquals(100L, result.getId(), "正常成员（含 MEMBER）应可创建部门");
+        verify(enterpriseDepartmentMapper).insert(any(EnterpriseDepartment.class));
     }
 
     @Test
     void shouldRejectParentOutsideCurrentEnterprise() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         // 按「父部门 ID + 当前企业 ID」查询不到时，不允许跨企业挂接。
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(null);
 
@@ -153,7 +162,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldRejectDuplicateNameUnderSameParent() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         when(enterpriseDepartmentMapper.exists(any())).thenReturn(true);
 
         BusinessException exception = assertThrows(BusinessException.class,
@@ -240,7 +249,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldUpdateDepartmentAndMoveItToRoot() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         EnterpriseDepartment root = department(1L, 10L, null, "研发部");
         EnterpriseDepartment target = department(2L, 10L, 1L, "后端组");
         when(enterpriseDepartmentMapper.selectList(any())).thenReturn(List.of(root, target));
@@ -262,7 +271,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldRejectMovingDepartmentUnderItsDescendant() {
-        allowManager(EnterpriseMemberRole.ADMIN);
+        allowActiveMember();
         EnterpriseDepartment root = department(1L, 10L, null, "研发部");
         EnterpriseDepartment child = department(2L, 10L, 1L, "后端组");
         when(enterpriseDepartmentMapper.selectList(any())).thenReturn(List.of(root, child));
@@ -279,7 +288,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldRejectUnknownParentWhenUpdatingDepartment() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         EnterpriseDepartment target = department(2L, 10L, null, "后端组");
         when(enterpriseDepartmentMapper.selectList(any())).thenReturn(List.of(target));
 
@@ -292,7 +301,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldDisableDepartment() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         EnterpriseDepartment target = department(2L, 10L, 1L, "后端组");
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(target);
         when(enterpriseDepartmentMapper.update(
@@ -312,7 +321,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldEnableDisabledDepartment() {
-        allowManager(EnterpriseMemberRole.ADMIN);
+        allowActiveMember();
         EnterpriseDepartment target = department(2L, 10L, 1L, "后端组");
         target.setStatus(EnterpriseDepartmentStatus.DISABLED);
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(target);
@@ -328,23 +337,28 @@ class DepartmentServiceImplTest {
     }
 
     @Test
-    void shouldRejectPlainMemberWhenUpdatingDepartmentStatus() {
-        allowManager(EnterpriseMemberRole.MEMBER);
+    void shouldAllowPlainMemberToUpdateDepartmentStatus() {
+        // MEMBER 角色也能修改部门状态：管理权限由 @PreAuthorize 校验，Service 只校验成员身份。
+        allowActiveMember();
+        EnterpriseDepartment target = department(2L, 10L, 1L, "后端组");
+        when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(target);
+        when(enterpriseDepartmentMapper.update(
+                org.mockito.ArgumentMatchers.<EnterpriseDepartment>isNull(),
+                anyDepartmentWrapper())).thenReturn(1);
 
-        BusinessException exception = assertThrows(BusinessException.class,
-                () -> departmentService.updateDepartmentStatus(
-                        7L, 10L, 2L, statusRequest(EnterpriseDepartmentStatus.DISABLED)));
+        EnterpriseDepartment result = departmentService.updateDepartmentStatus(
+                7L, 10L, 2L, statusRequest(EnterpriseDepartmentStatus.DISABLED));
 
-        assertEquals(ErrorCode.FORBIDDEN, exception.getErrorCode());
-        verify(enterpriseDepartmentMapper, never()).selectOne(any());
-        verify(enterpriseDepartmentMapper, never()).update(
+        assertEquals(EnterpriseDepartmentStatus.DISABLED, result.getStatus(),
+                "正常成员（含 MEMBER）应可修改部门状态");
+        verify(enterpriseDepartmentMapper).update(
                 org.mockito.ArgumentMatchers.<EnterpriseDepartment>isNull(),
                 anyDepartmentWrapper());
     }
 
     @Test
     void shouldTreatUnchangedDepartmentStatusAsIdempotent() {
-        allowManager(EnterpriseMemberRole.ADMIN);
+        allowActiveMember();
         EnterpriseDepartment target = department(2L, 10L, 1L, "后端组");
         target.setStatus(EnterpriseDepartmentStatus.DISABLED);
         Instant originalUpdatedAt = NOW.minusSeconds(60);
@@ -363,7 +377,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldRejectUpdatingStatusOfUnknownDepartment() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(null);
 
         BusinessException exception = assertThrows(BusinessException.class,
@@ -378,7 +392,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldDeleteLeafDepartment() {
-        allowManager(EnterpriseMemberRole.OWNER);
+        allowActiveMember();
         EnterpriseDepartment target = department(2L, 10L, 1L, "后端组");
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(target);
         when(enterpriseDepartmentMapper.exists(any())).thenReturn(false);
@@ -391,7 +405,7 @@ class DepartmentServiceImplTest {
 
     @Test
     void shouldRejectDeletingDepartmentWithChildren() {
-        allowManager(EnterpriseMemberRole.ADMIN);
+        allowActiveMember();
         EnterpriseDepartment target = department(1L, 10L, null, "研发部");
         when(enterpriseDepartmentMapper.selectOne(any())).thenReturn(target);
         when(enterpriseDepartmentMapper.exists(any())).thenReturn(true);
@@ -405,16 +419,6 @@ class DepartmentServiceImplTest {
 
     private Wrapper<EnterpriseDepartment> anyDepartmentWrapper() {
         return any();
-    }
-
-    private void allowManager(EnterpriseMemberRole role) {
-        when(enterpriseMapper.selectById(10L)).thenReturn(new Enterprise());
-        EnterpriseMember member = new EnterpriseMember();
-        member.setEnterpriseId(10L);
-        member.setUserId(7L);
-        member.setMemberRole(role);
-        member.setStatus(EnterpriseMemberStatus.NORMAL);
-        when(enterpriseMemberMapper.selectOne(any())).thenReturn(member);
     }
 
     private void allowActiveMember() {

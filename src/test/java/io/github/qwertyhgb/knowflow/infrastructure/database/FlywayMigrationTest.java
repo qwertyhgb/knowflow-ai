@@ -33,7 +33,9 @@ class FlywayMigrationTest {
             "2", "create enterprise",
             "3", "create enterprise member",
             "4", "create enterprise invitation",
-            "5", "create enterprise department");
+            "5", "create enterprise department",
+            "6", "create enterprise rbac tables",
+            "7", "drop member role from enterprise member");
 
     @Autowired
     private DataSource dataSource;
@@ -84,7 +86,8 @@ class FlywayMigrationTest {
                     tableColumns(statement, "enterprise"));
 
             assertTableExists(statement, "enterprise_member");
-            assertEquals(Set.of("id", "enterprise_id", "user_id", "member_role", "status",
+            // V7 已删除 V3 遗留的 member_role 列，角色统一经 role_id 关联 enterprise_role。
+            assertEquals(Set.of("id", "enterprise_id", "user_id", "role_id", "status",
                             "joined_at", "created_at", "updated_at"),
                     tableColumns(statement, "enterprise_member"));
 
@@ -98,6 +101,25 @@ class FlywayMigrationTest {
             assertEquals(Set.of("id", "enterprise_id", "parent_id", "name", "sort_order",
                             "status", "created_at", "updated_at"),
                     tableColumns(statement, "enterprise_department"));
+        }
+    }
+
+    @Test
+    void shouldCreateEnterpriseRbacTablesWithExpectedColumns() throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            assertTableExists(statement, "enterprise_role");
+            assertEquals(Set.of("id", "enterprise_id", "code", "name", "description",
+                            "status", "created_at", "updated_at"),
+                    tableColumns(statement, "enterprise_role"));
+
+            assertTableExists(statement, "permission");
+            assertEquals(Set.of("id", "code", "name", "created_at", "updated_at"),
+                    tableColumns(statement, "permission"));
+
+            assertTableExists(statement, "enterprise_role_permission");
+            assertEquals(Set.of("id", "enterprise_role_id", "permission_id", "created_at"),
+                    tableColumns(statement, "enterprise_role_permission"));
         }
     }
 

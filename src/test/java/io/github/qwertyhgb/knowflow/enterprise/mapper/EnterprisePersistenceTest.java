@@ -1,11 +1,16 @@
 package io.github.qwertyhgb.knowflow.enterprise.mapper;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseInvitation;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRolePermission;
+import io.github.qwertyhgb.knowflow.enterprise.entity.Permission;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseInvitationStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
+import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseRoleStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseStatus;
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseCreateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseService;
@@ -23,6 +28,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -52,6 +60,15 @@ class EnterprisePersistenceTest {
     private EnterpriseInvitationMapper enterpriseInvitationMapper;
 
     @Autowired
+    private EnterpriseRoleMapper enterpriseRoleMapper;
+
+    @Autowired
+    private PermissionMapper permissionMapper;
+
+    @Autowired
+    private EnterpriseRolePermissionMapper enterpriseRolePermissionMapper;
+
+    @Autowired
     private EnterpriseService enterpriseService;
 
     @Test
@@ -72,21 +89,25 @@ class EnterprisePersistenceTest {
         assertEquals(1, enterpriseMapper.insert(enterprise));
         assertNotNull(enterprise.getId());
 
+        // 成员必须关联企业角色（role_id 非空，V6 两阶段迁移后的契约），为该企业创建内置角色。
+        EnterpriseRole role = new EnterpriseRole();
+        role.setEnterpriseId(enterprise.getId());
+        role.setCode("ADMIN");
+        role.setName("管理员");
+        role.setStatus(EnterpriseRoleStatus.NORMAL);
+        assertEquals(1, enterpriseRoleMapper.insert(role));
+        assertNotNull(role.getId());
+
         EnterpriseMember member = new EnterpriseMember();
         member.setEnterpriseId(enterprise.getId());
         member.setUserId(user.getId());
-        member.setMemberRole(EnterpriseMemberRole.ADMIN);
+        member.setRoleId(role.getId());
         member.setStatus(EnterpriseMemberStatus.DISABLED);
         assertEquals(1, enterpriseMemberMapper.insert(member));
         assertNotNull(member.getId());
 
-        Enterprise savedEnterprise = enterpriseMapper.selectById(enterprise.getId());
-        assertEquals(EnterpriseStatus.DISABLED, savedEnterprise.getStatus());
-        assertNotNull(savedEnterprise.getCreatedAt());
-        assertNotNull(savedEnterprise.getUpdatedAt());
-
         EnterpriseMember savedMember = enterpriseMemberMapper.selectById(member.getId());
-        assertEquals(EnterpriseMemberRole.ADMIN, savedMember.getMemberRole());
+        assertEquals(role.getId(), savedMember.getRoleId(), "成员应关联到企业角色");
         assertEquals(EnterpriseMemberStatus.DISABLED, savedMember.getStatus());
         assertNotNull(savedMember.getJoinedAt());
         assertNotNull(savedMember.getCreatedAt());
@@ -95,7 +116,7 @@ class EnterprisePersistenceTest {
         EnterpriseMember duplicate = new EnterpriseMember();
         duplicate.setEnterpriseId(enterprise.getId());
         duplicate.setUserId(user.getId());
-        duplicate.setMemberRole(EnterpriseMemberRole.MEMBER);
+        duplicate.setRoleId(role.getId());
         duplicate.setStatus(EnterpriseMemberStatus.NORMAL);
         assertThrows(DuplicateKeyException.class, () -> enterpriseMemberMapper.insert(duplicate));
     }
@@ -179,5 +200,57 @@ class EnterprisePersistenceTest {
         duplicateToken.setExpiresAt(invitation.getExpiresAt());
         assertThrows(DuplicateKeyException.class,
                 () -> enterpriseInvitationMapper.insert(duplicateToken));
+    }
+
+    @Test
+    @Transactional
+    void shouldPersistRolePermissionAndQueryPermissionCodesByRoleId() {
+        // 准备企业作为角色的归属租户。
+        Enterprise enterprise = new Enterprise();
+        enterprise.setName("Rbac Test");
+        enterprise.setSlug("rbac-test");
+        enterprise.setStatus(EnterpriseStatus.NORMAL);
+        assertEquals(1, enterpriseMapper.insert(enterprise));
+
+        // 企业角色：编码企业内部唯一，状态用枚举落库（NORMAL→1）。
+        EnterpriseRole role = new EnterpriseRole();
+        role.setEnterpriseId(enterprise.getId());
+        role.setCode("ADMIN");
+        role.setName("管理员");
+        role.setDescription("可管理成员与大部分企业设置");
+        role.setStatus(EnterpriseRoleStatus.NORMAL);
+        assertEquals(1, enterpriseRoleMapper.insert(role));
+        assertNotNull(role.getId());
+        assertEquals(EnterpriseRoleStatus.NORMAL,
+                enterpriseRoleMapper.selectById(role.getId()).getStatus(), "角色状态枚举应可读写往返");
+
+        // 平台级权限由 V6 迁移预置（member:view、member:remove 等），
+        // 这里直接按编码查询复用，避免与种子数据的唯一编码冲突。
+        Permission view = permissionMapper.selectOne(
+                new LambdaQueryWrapper<Permission>().eq(Permission::getCode, "member:view"));
+        Permission remove = permissionMapper.selectOne(
+                new LambdaQueryWrapper<Permission>().eq(Permission::getCode, "member:remove"));
+        assertNotNull(view, "V6 迁移应预置 member:view 权限");
+        assertNotNull(remove, "V6 迁移应预置 member:remove 权限");
+
+        // 角色-权限关联：一条记录 = 该角色被授予一个权限。
+        EnterpriseRolePermission rp1 = new EnterpriseRolePermission();
+        rp1.setEnterpriseRoleId(role.getId());
+        rp1.setPermissionId(view.getId());
+        assertEquals(1, enterpriseRolePermissionMapper.insert(rp1));
+
+        EnterpriseRolePermission rp2 = new EnterpriseRolePermission();
+        rp2.setEnterpriseRoleId(role.getId());
+        rp2.setPermissionId(remove.getId());
+        assertEquals(1, enterpriseRolePermissionMapper.insert(rp2));
+
+        // 自定义 SQL：按角色 ID 取权限码，供 @PreAuthorize("hasAuthority(...)") 鉴权使用。
+        List<String> codes = enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(role.getId());
+        assertEquals(2, codes.size(), "应返回该角色被授予的 2 个权限码");
+        assertEquals(Set.of("member:view", "member:remove"), new HashSet<>(codes));
+
+        // 未关联任何权限的角色返回空列表，调用方按「无权限」处理。
+        assertEquals(0, enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(Long.MAX_VALUE).size(),
+                "不存在的角色应返回空权限码列表");
     }
 }

@@ -9,11 +9,14 @@ import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseMemberStatu
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseUpdateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
+import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseRoleStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRoleMapper;
+import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseMembershipChecker;
 import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseService;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseMemberVO;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseVO;
@@ -56,6 +59,9 @@ public class EnterpriseServiceImpl implements EnterpriseService {
 
     private final EnterpriseMemberMapper enterpriseMemberMapper;
 
+    /** 企业角色表 Mapper：创建企业时预置内置角色、按 roleId 解析角色编码。 */
+    private final EnterpriseRoleMapper enterpriseRoleMapper;
+
     /**
      * 可注入的 UTC 时钟，用于生成 {@code createdAt} / {@code updatedAt} / {@code joinedAt}：
      * 生产注入 {@code Clock.systemUTC()}，测试注入 {@code Clock.fixed(...)} 冻结时间。
@@ -65,13 +71,20 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     /** 用户表 Mapper，用于成员列表关联查询邮箱/昵称。 */
     private final UserMapper userMapper;
 
+    /** 企业成员身份校验（企业存在 → 404；正常成员 → 403），与邀请/部门模块共用。 */
+    private final EnterpriseMembershipChecker membershipChecker;
+
     public EnterpriseServiceImpl(EnterpriseMapper enterpriseMapper,
                                  EnterpriseMemberMapper enterpriseMemberMapper,
+                                 EnterpriseRoleMapper enterpriseRoleMapper,
                                  UserMapper userMapper,
+                                 EnterpriseMembershipChecker membershipChecker,
                                  Clock clock) {
         this.enterpriseMapper = enterpriseMapper;
         this.enterpriseMemberMapper = enterpriseMemberMapper;
+        this.enterpriseRoleMapper = enterpriseRoleMapper;
         this.userMapper = userMapper;
+        this.membershipChecker = membershipChecker;
         this.clock = clock;
     }
 
@@ -89,11 +102,16 @@ public class EnterpriseServiceImpl implements EnterpriseService {
         enterprise.setUpdatedAt(now);
         enterpriseMapper.insert(enterprise);
 
-        // 创建者自动成为企业所有者，与企业同属一个事务。
+        // 为新企业预置 V6 约定的 3 个内置角色（OWNER / ADMIN / MEMBER），
+        // 与迁移时「为每个已有企业插入内置角色」的语义保持一致。
+        insertBuiltinRoles(enterprise.getId(), now);
+
+        // 创建者自动成为企业所有者（角色编码 OWNER），与企业同属一个事务。
+        // 角色判断一律经 enterprise_role.code，V3 遗留的 member_role 列已退役（V7 删除）。
         EnterpriseMember member = new EnterpriseMember();
         member.setEnterpriseId(enterprise.getId());
         member.setUserId(userId);
-        member.setMemberRole(EnterpriseMemberRole.OWNER);
+        member.setRoleId(ownerRoleId(enterprise.getId()));
         member.setStatus(EnterpriseMemberStatus.NORMAL);
         member.setJoinedAt(now);
         member.setCreatedAt(now);
@@ -103,6 +121,35 @@ public class EnterpriseServiceImpl implements EnterpriseService {
         // 日志只记录系统生成的标识（enterpriseId、userId），不记录企业名称等用户自由文本。
         log.info("event=enterprise_created enterpriseId={} userId={}", enterprise.getId(), userId);
         return EnterpriseVO.from(enterprise);
+    }
+
+    /** 为新企业插入 V6 约定的 3 个内置角色；编码与名称与 V6 迁移的种子数据一致。 */
+    private void insertBuiltinRoles(Long enterpriseId, Instant now) {
+        insertBuiltinRole(enterpriseId, "OWNER", "所有者", "企业所有者，拥有全部权限", now);
+        insertBuiltinRole(enterpriseId, "ADMIN", "管理员", "可管理成员与大部分企业设置", now);
+        insertBuiltinRole(enterpriseId, "MEMBER", "成员", "默认角色", now);
+    }
+
+    private void insertBuiltinRole(Long enterpriseId, String code, String name,
+                                   String description, Instant now) {
+        EnterpriseRole role = new EnterpriseRole();
+        role.setEnterpriseId(enterpriseId);
+        role.setCode(code);
+        role.setName(name);
+        role.setDescription(description);
+        role.setStatus(EnterpriseRoleStatus.NORMAL);
+        role.setCreatedAt(now);
+        role.setUpdatedAt(now);
+        enterpriseRoleMapper.insert(role);
+    }
+
+    /** 查询新企业 OWNER 内置角色的 ID（内置角色刚由本事务插入，必存在）。 */
+    private Long ownerRoleId(Long enterpriseId) {
+        EnterpriseRole ownerRole = enterpriseRoleMapper.selectOne(
+                new LambdaQueryWrapper<EnterpriseRole>()
+                        .eq(EnterpriseRole::getEnterpriseId, enterpriseId)
+                        .eq(EnterpriseRole::getCode, "OWNER"));
+        return ownerRole.getId();
     }
 
     @Override
@@ -138,9 +185,9 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     @Override
     @Transactional(readOnly = true)
     public EnterpriseVO getEnterpriseDetail(Long userId, Long enterpriseId) {
-        // 企业不存在 → 404；非正常成员 → 403。校验逻辑抽取到私有方法复用。
-        Enterprise enterprise = requireEnterprise(enterpriseId);
-        requireActiveMember(userId, enterpriseId);
+        // 企业不存在 → 404；非正常成员 → 403。统一由 EnterpriseMembershipChecker 校验。
+        Enterprise enterprise = membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
         return EnterpriseVO.from(enterprise);
     }
 
@@ -149,25 +196,14 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     public EnterpriseVO updateEnterprise(Long userId, Long enterpriseId, EnterpriseUpdateRequest request) {
         // 1. 企业不存在直接返回 404；先校验资源存在再做权限判断，
         //    避免把「不存在」误报成「无权限」。
-        Enterprise enterprise = requireEnterprise(enterpriseId);
+        Enterprise enterprise = membershipChecker.requireEnterprise(enterpriseId);
 
-        // 2. 校验成员关系：必须存在且状态正常，否则 403。
-        EnterpriseMember member = enterpriseMemberMapper.selectOne(
-                new LambdaQueryWrapper<EnterpriseMember>()
-                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
-                        .eq(EnterpriseMember::getUserId, userId));
-        if (member == null || member.getStatus() != EnterpriseMemberStatus.NORMAL) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
+        // 2. 校验当前用户是该企业的正常成员（403）。
+        //    管理权限（enterprise:update）由 Controller 的 @PreAuthorize 按权限码校验，
+        //    此处只保证企业成员身份，不再判断 OWNER/ADMIN 角色。
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
-        // 3. 角色校验：仅管理角色（OWNER 或 ADMIN）可修改企业设置。
-        //    OWNER 是创建者、拥有全部权限，必须一并放行——否则创建者反而无法修改自己的企业。
-        if (member.getMemberRole() != EnterpriseMemberRole.OWNER
-                && member.getMemberRole() != EnterpriseMemberRole.ADMIN) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-
-        // 4. 只更新允许变更的字段，避免把查询到的旧 slug/status/createdAt 回写，
+        // 3. 只更新允许变更的字段，避免把查询到的旧 slug/status/createdAt 回写，
         //    从而覆盖其他并发业务对这些字段的修改。
         String name = request.getName().strip();
         Instant updatedAt = clock.instant();
@@ -192,9 +228,10 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     @Transactional(readOnly = true)
     public List<EnterpriseMemberVO> listMembers(Long userId, Long enterpriseId) {
         // 权限：企业存在（404）+ 当前用户是正常成员（403）。
-        // ADMIN 与 MEMBER 均可查看成员列表，故此处不做角色限制。
-        requireEnterprise(enterpriseId);
-        requireActiveMember(userId, enterpriseId);
+        // 查看成员列表的权限（member:view）由 Controller 的 @PreAuthorize 校验，
+        // 此处只保证成员身份，不再做角色限制。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 1. 查询该企业全部成员关系，按加入时间升序保证返回顺序稳定。
         List<EnterpriseMember> members = enterpriseMemberMapper.selectList(
@@ -213,9 +250,26 @@ public class EnterpriseServiceImpl implements EnterpriseService {
                 : userMapper.selectByIds(userIds).stream()
                         .collect(Collectors.toMap(User::getId, Function.identity()));
 
-        // 3. 组装 VO；若某 userId 在 sys_user 中已不存在，email/nickname 留空。
+        // 3. 批量查询成员角色编码（roleId → enterprise_role.code），避免 N+1；
+        //    角色记录不存在（异常情况）时编码为 null，不阻断列表返回。
+        List<Long> roleIds = members.stream()
+                .map(EnterpriseMember::getRoleId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList();
+        Map<Long, EnterpriseRole> roleMap = roleIds.isEmpty()
+                ? Map.of()
+                : enterpriseRoleMapper.selectBatchIds(roleIds).stream()
+                        .collect(Collectors.toMap(EnterpriseRole::getId, Function.identity()));
+
+        // 4. 组装 VO；若某 userId 在 sys_user 中已不存在，email/nickname 留空。
         return members.stream()
-                .map(member -> EnterpriseMemberVO.from(member, userMap.get(member.getUserId())))
+                .map(member -> {
+                    EnterpriseRole role = member.getRoleId() == null ? null : roleMap.get(member.getRoleId());
+                    return EnterpriseMemberVO.from(member,
+                            role != null ? role.getCode() : null,
+                            userMap.get(member.getUserId()));
+                })
                 .toList();
     }
 
@@ -223,10 +277,12 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     @Transactional
     public void removeMember(Long userId, Long enterpriseId, Long targetUserId) {
         // 1. 企业必须存在：先校验资源存在再做权限判断，避免把「不存在」误报成「无权限」。
-        requireEnterprise(enterpriseId);
+        membershipChecker.requireEnterprise(enterpriseId);
 
-        // 2. 当前用户必须是该企业正常成员且角色为 OWNER/ADMIN（禁止 MEMBER）。
-        requireAdminRole(userId, enterpriseId);
+        // 2. 当前用户必须是该企业的正常成员（403）。
+        //    移除成员的权限（member:remove）由 Controller 的 @PreAuthorize 校验，
+        //    此处只保证成员身份，不再判断 OWNER/ADMIN 角色。
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 3. 不能移除自己：管理员可以踢人但不能把自己踢出企业——
         //    否则企业会失去所有者或变成只剩一个非 OWNER 的管理员，导致管理死锁。
@@ -246,7 +302,8 @@ public class EnterpriseServiceImpl implements EnterpriseService {
 
         // 5. OWNER 不能被移除：所有者是企业创建者，即使被禁用成员关系也保留历史痕迹；
         //    这相当于给 OWNER 上了最后的安全栓，防止误操作或恶意内鬼清空企业管理层。
-        if (targetMember.getMemberRole() == EnterpriseMemberRole.OWNER) {
+        //    角色判断经 roleId 关联的 enterprise_role.code（V3 的 member_role 列已退役）。
+        if (isOwnerRole(targetMember)) {
             throw new BusinessException(ErrorCode.CANNOT_REMOVE_OWNER);
         }
 
@@ -275,7 +332,7 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     @Transactional
     public void leaveEnterprise(Long userId, Long enterpriseId) {
         // 1. 企业必须存在：保持「先资源后权限」的全模块校验顺序。
-        requireEnterprise(enterpriseId);
+        membershipChecker.requireEnterprise(enterpriseId);
 
         // 2. 退出不需要管理员角色，只按「企业 + 当前用户 ID」查成员关系。
         EnterpriseMember member = enterpriseMemberMapper.selectOne(
@@ -287,7 +344,8 @@ public class EnterpriseServiceImpl implements EnterpriseService {
         }
 
         // 3. OWNER 不能主动退出，否则企业会失去所有者；这与管理员移除 OWNER 的语义不同。
-        if (member.getMemberRole() == EnterpriseMemberRole.OWNER) {
+        //    角色判断经 roleId 关联的 enterprise_role.code（V3 的 member_role 列已退役）。
+        if (isOwnerRole(member)) {
             throw new BusinessException(ErrorCode.OWNER_CANNOT_LEAVE);
         }
 
@@ -316,9 +374,11 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     @Transactional
     public EnterpriseMemberVO updateMemberStatus(Long userId, Long enterpriseId, Long targetUserId,
                                                  EnterpriseMemberStatusUpdateRequest request) {
-        // 1. 企业必须存在 + 当前用户是管理成员：与移除成员共用同一套前置校验。
-        requireEnterprise(enterpriseId);
-        requireAdminRole(userId, enterpriseId);
+        // 1. 企业必须存在 + 当前用户是正常成员：与移除成员共用同一套前置校验。
+        //    修改成员状态的权限（member:status）由 Controller 的 @PreAuthorize 校验，
+        //    此处只保证企业成员身份，不再判断 OWNER/ADMIN 角色。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 2. 目标成员必须在企业中（404，不泄露存在性）。
         EnterpriseMember targetMember = enterpriseMemberMapper.selectOne(
@@ -330,7 +390,8 @@ public class EnterpriseServiceImpl implements EnterpriseService {
         }
 
         // 3. 目标为 OWNER 时拒绝：所有者状态不可修改（禁用 OWNER 等价于移除所有者）。
-        if (targetMember.getMemberRole() == EnterpriseMemberRole.OWNER) {
+        //    角色判断经 roleId 关联的 enterprise_role.code（V3 的 member_role 列已退役）。
+        if (isOwnerRole(targetMember)) {
             throw new BusinessException(ErrorCode.CANNOT_REMOVE_OWNER);
         }
 
@@ -368,65 +429,33 @@ public class EnterpriseServiceImpl implements EnterpriseService {
     }
 
     /**
-     * 组装成员视图：关联目标用户的公开信息（邮箱/昵称）；
+     * 组装成员视图：关联目标用户的公开信息（邮箱/昵称）与成员角色编码；
      * 用户记录不存在（异常情况）时邮箱/昵称留空，与成员列表行为一致。
      */
     private EnterpriseMemberVO toMemberVO(EnterpriseMember member) {
         User user = userMapper.selectById(member.getUserId());
-        return EnterpriseMemberVO.from(member, user);
+        return EnterpriseMemberVO.from(member, roleCodeOf(member.getRoleId()), user);
     }
 
     /**
-     * 查询企业，不存在时抛 404。
+     * 判断成员是否持有 OWNER 角色。
      *
-     * <p>统一「资源不存在」的判定，供详情、更新、成员列表复用，
-     * 保证错误码与校验顺序（先资源后权限）在各接口一致。</p>
+     * <p>角色判断一律经 {@code roleId → enterprise_role.code}（V3 的 {@code member_role}
+     * 列已在 V7 迁移中退役）；角色不存在时按非 OWNER 处理。</p>
      */
-    private Enterprise requireEnterprise(Long enterpriseId) {
-        Enterprise enterprise = enterpriseMapper.selectById(enterpriseId);
-        if (enterprise == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
-        }
-        return enterprise;
+    private boolean isOwnerRole(EnterpriseMember member) {
+        return "OWNER".equals(roleCodeOf(member.getRoleId()));
     }
 
     /**
-     * 校验当前用户是否为该企业的正常成员，否则抛 403。
-     *
-     * <p>核心安全规则：<strong>知道 {@code enterpriseId} 不等于有权访问企业</strong>，
-     * 只有「成员关系存在且状态为正常」才放行。抽取为私有方法供详情、成员列表复用，
-     * 保证安全判定逻辑单一来源，不会因多处重复实现而出现不一致。</p>
+     * 查询角色编码；角色 ID 为空或角色记录不存在时返回 null。
      */
-    private void requireActiveMember(Long userId, Long enterpriseId) {
-        boolean isActiveMember = enterpriseMemberMapper.exists(
-                new LambdaQueryWrapper<EnterpriseMember>()
-                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
-                        .eq(EnterpriseMember::getUserId, userId)
-                        .eq(EnterpriseMember::getStatus, EnterpriseMemberStatus.NORMAL));
-        if (!isActiveMember) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
+    private String roleCodeOf(Long roleId) {
+        if (roleId == null) {
+            return null;
         }
-    }
-
-    /**
-     * 校验当前用户是该企业的<strong>管理成员</strong>（OWNER / ADMIN），否则抛 403。
-     *
-     * <p>与 {@link #requireActiveMember} 相比，本方法额外检查角色——
-     * 只允许 OWNER 和 ADMIN（含被禁用的成员同样不能执行管理操作）。
-     * 移除成员、创建邀请等写操作均复用此校验。</p>
-     */
-    private void requireAdminRole(Long userId, Long enterpriseId) {
-        EnterpriseMember member = enterpriseMemberMapper.selectOne(
-                new LambdaQueryWrapper<EnterpriseMember>()
-                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
-                        .eq(EnterpriseMember::getUserId, userId));
-        if (member == null || member.getStatus() != EnterpriseMemberStatus.NORMAL) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-        if (member.getMemberRole() != EnterpriseMemberRole.OWNER
-                && member.getMemberRole() != EnterpriseMemberRole.ADMIN) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
+        EnterpriseRole role = enterpriseRoleMapper.selectById(roleId);
+        return role == null ? null : role.getCode();
     }
 
     /**

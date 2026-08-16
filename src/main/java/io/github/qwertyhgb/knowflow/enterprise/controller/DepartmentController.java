@@ -10,6 +10,7 @@ import io.github.qwertyhgb.knowflow.enterprise.service.DepartmentService;
 import io.github.qwertyhgb.knowflow.enterprise.vo.DepartmentTreeVO;
 import io.github.qwertyhgb.knowflow.enterprise.vo.DepartmentVO;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -40,9 +41,13 @@ public class DepartmentController {
     }
 
     /**
-     * 创建部门（需当前企业的 OWNER 或 ADMIN 角色）。
+     * 创建部门。
+     *
+     * <p>需要 {@code department:create} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
      */
     @PostMapping
+    @PreAuthorize("hasAuthority('department:create')")
     public Result<DepartmentVO> createDepartment(Authentication authentication,
                                                  @PathVariable Long enterpriseId,
                                                  @Valid @RequestBody DepartmentCreateRequest request) {
@@ -61,8 +66,14 @@ public class DepartmentController {
         return Result.success(departmentService.listDepartmentTree(userId, enterpriseId));
     }
 
-    /** 更新部门名称、层级与排序（需当前企业的 OWNER 或 ADMIN 角色）。 */
+    /**
+     * 更新部门名称、层级与排序。
+     *
+     * <p>需要 {@code department:update} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
+     */
     @PutMapping("/{departmentId}")
+    @PreAuthorize("hasAuthority('department:update')")
     public Result<DepartmentVO> updateDepartment(Authentication authentication,
                                                  @PathVariable Long enterpriseId,
                                                  @PathVariable Long departmentId,
@@ -73,8 +84,14 @@ public class DepartmentController {
         return Result.success(DepartmentVO.from(department));
     }
 
-    /** 启用或禁用部门（需当前企业的 OWNER 或 ADMIN 角色）。 */
+    /**
+     * 启用或禁用部门。
+     *
+     * <p>需要 {@code department:status} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
+     */
     @PutMapping("/{departmentId}/status")
+    @PreAuthorize("hasAuthority('department:status')")
     public Result<DepartmentVO> updateDepartmentStatus(
             Authentication authentication,
             @PathVariable Long enterpriseId,
@@ -86,8 +103,14 @@ public class DepartmentController {
         return Result.success(DepartmentVO.from(department));
     }
 
-    /** 删除叶子部门（需当前企业的 OWNER 或 ADMIN 角色）。 */
+    /**
+     * 删除叶子部门。
+     *
+     * <p>需要 {@code department:delete} 权限，由 {@code EnterpriseContextFilter} 从
+     * 角色-权限关联加载权限码并注入 authorities；权限不足返回 403。</p>
+     */
     @DeleteMapping("/{departmentId}")
+    @PreAuthorize("hasAuthority('department:delete')")
     public Result<Void> deleteDepartment(Authentication authentication,
                                          @PathVariable Long enterpriseId,
                                          @PathVariable Long departmentId) {

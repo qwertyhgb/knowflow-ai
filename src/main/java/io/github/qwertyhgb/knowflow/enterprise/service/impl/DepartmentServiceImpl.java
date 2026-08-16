@@ -8,14 +8,10 @@ import io.github.qwertyhgb.knowflow.enterprise.dto.request.DepartmentCreateReque
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.DepartmentStatusUpdateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.DepartmentUpdateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseDepartment;
-import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseDepartmentStatus;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseDepartmentMapper;
-import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMapper;
-import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
 import io.github.qwertyhgb.knowflow.enterprise.service.DepartmentService;
+import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseMembershipChecker;
 import io.github.qwertyhgb.knowflow.enterprise.vo.DepartmentTreeVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -40,22 +36,19 @@ import java.util.Set;
 @Service
 public class DepartmentServiceImpl implements DepartmentService {
 
-    private final EnterpriseMapper enterpriseMapper;
-
-    private final EnterpriseMemberMapper enterpriseMemberMapper;
-
     private final EnterpriseDepartmentMapper enterpriseDepartmentMapper;
+
+    /** 企业成员身份校验（企业存在 → 404；正常成员 → 403），与成员/邀请模块共用。 */
+    private final EnterpriseMembershipChecker membershipChecker;
 
     /** 可注入的 UTC 时钟，便于测试冻结创建时间。 */
     private final Clock clock;
 
-    public DepartmentServiceImpl(EnterpriseMapper enterpriseMapper,
-                                 EnterpriseMemberMapper enterpriseMemberMapper,
-                                 EnterpriseDepartmentMapper enterpriseDepartmentMapper,
+    public DepartmentServiceImpl(EnterpriseDepartmentMapper enterpriseDepartmentMapper,
+                                 EnterpriseMembershipChecker membershipChecker,
                                  Clock clock) {
-        this.enterpriseMapper = enterpriseMapper;
-        this.enterpriseMemberMapper = enterpriseMemberMapper;
         this.enterpriseDepartmentMapper = enterpriseDepartmentMapper;
+        this.membershipChecker = membershipChecker;
         this.clock = clock;
     }
 
@@ -63,11 +56,11 @@ public class DepartmentServiceImpl implements DepartmentService {
     @Transactional
     public EnterpriseDepartment createDepartment(Long userId, Long enterpriseId,
                                                  DepartmentCreateRequest request) {
-        // 1. 先校验企业存在，再校验管理权限，保持与现有企业业务一致的错误顺序。
-        if (enterpriseMapper.selectById(enterpriseId) == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
-        }
-        requireManagerMember(userId, enterpriseId);
+        // 1. 先校验企业存在，再校验成员身份，保持与现有企业业务一致的错误顺序。
+        //    创建部门的权限（department:create）由 Controller 的 @PreAuthorize 校验，
+        //    此处只保证企业成员身份，不再判断 OWNER/ADMIN 角色。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 2. 父部门必须属于当前企业；组合条件可以阻止把部门挂到其他租户的部门下。
         Long parentId = request.getParentId();
@@ -118,10 +111,8 @@ public class DepartmentServiceImpl implements DepartmentService {
     @Transactional(readOnly = true)
     public List<DepartmentTreeVO> listDepartmentTree(Long userId, Long enterpriseId) {
         // 1. 与其他企业作用域查询一致：先判断企业是否存在，再校验正常成员身份。
-        if (enterpriseMapper.selectById(enterpriseId) == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
-        }
-        requireActiveMember(userId, enterpriseId);
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 2. 一次查询取回当前企业的全部部门，避免递归查询造成 N+1。
         //    全局按 sortOrder + id 排序后，各父节点下的子列表也会保持相同稳定顺序。
@@ -156,11 +147,10 @@ public class DepartmentServiceImpl implements DepartmentService {
     @Transactional
     public EnterpriseDepartment updateDepartment(Long userId, Long enterpriseId, Long departmentId,
                                                  DepartmentUpdateRequest request) {
-        // 1. 更新属于管理操作：企业必须存在，操作者必须是正常 OWNER/ADMIN。
-        if (enterpriseMapper.selectById(enterpriseId) == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
-        }
-        requireManagerMember(userId, enterpriseId);
+        // 1. 更新属于管理操作：企业必须存在，操作者必须是正常成员。
+        //    更新部门的权限（department:update）由 Controller 的 @PreAuthorize 校验。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 2. 一次加载当前企业部门，用于定位目标、验证父部门归属和检测层级循环。
         List<EnterpriseDepartment> departments = enterpriseDepartmentMapper.selectList(
@@ -230,11 +220,10 @@ public class DepartmentServiceImpl implements DepartmentService {
     public EnterpriseDepartment updateDepartmentStatus(
             Long userId, Long enterpriseId, Long departmentId,
             DepartmentStatusUpdateRequest request) {
-        // 1. 状态变更属于管理操作，沿用部门更新与删除的权限规则。
-        if (enterpriseMapper.selectById(enterpriseId) == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
-        }
-        requireManagerMember(userId, enterpriseId);
+        // 1. 状态变更属于管理操作，沿用部门更新与删除的成员身份校验。
+        //    修改部门状态的权限（department:status）由 Controller 的 @PreAuthorize 校验。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 2. 使用「企业 + 部门 ID」定位目标，防止跨企业修改部门状态。
         EnterpriseDepartment target = enterpriseDepartmentMapper.selectOne(
@@ -274,10 +263,9 @@ public class DepartmentServiceImpl implements DepartmentService {
     @Transactional
     public void deleteDepartment(Long userId, Long enterpriseId, Long departmentId) {
         // 1. 删除属于管理操作，并保持先资源、后权限的校验顺序。
-        if (enterpriseMapper.selectById(enterpriseId) == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
-        }
-        requireManagerMember(userId, enterpriseId);
+        //    删除部门的权限（department:delete）由 Controller 的 @PreAuthorize 校验。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMember(userId, enterpriseId);
 
         // 2. 必须按「企业 + 部门 ID」定位，避免通过其他企业的 ID 操作跨租户数据。
         EnterpriseDepartment target = enterpriseDepartmentMapper.selectOne(
@@ -334,30 +322,4 @@ public class DepartmentServiceImpl implements DepartmentService {
         return DepartmentTreeVO.from(department, children);
     }
 
-    /** 校验当前用户是企业的正常成员，OWNER、ADMIN、MEMBER 均可通过。 */
-    private void requireActiveMember(Long userId, Long enterpriseId) {
-        boolean activeMember = enterpriseMemberMapper.exists(
-                new LambdaQueryWrapper<EnterpriseMember>()
-                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
-                        .eq(EnterpriseMember::getUserId, userId)
-                        .eq(EnterpriseMember::getStatus, EnterpriseMemberStatus.NORMAL));
-        if (!activeMember) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-    }
-
-    /** 校验当前用户是企业的正常 OWNER 或 ADMIN 成员。 */
-    private void requireManagerMember(Long userId, Long enterpriseId) {
-        EnterpriseMember member = enterpriseMemberMapper.selectOne(
-                new LambdaQueryWrapper<EnterpriseMember>()
-                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
-                        .eq(EnterpriseMember::getUserId, userId));
-        if (member == null || member.getStatus() != EnterpriseMemberStatus.NORMAL) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-        if (member.getMemberRole() != EnterpriseMemberRole.OWNER
-                && member.getMemberRole() != EnterpriseMemberRole.ADMIN) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-    }
 }

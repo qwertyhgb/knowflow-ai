@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * 邀请方接口（以被邀请人视角为主）。
+ * 我的邀请接口（被邀请人视角）。
  *
  * <p>与 {@link EnterpriseInvitationController}（企业视角的邀请管理，挂在
  * {@code /api/enterprises/{enterpriseId}/invitations} 下）相对，
@@ -27,11 +27,11 @@ import java.util.List;
  */
 @RestController
 @RequestMapping("/api/invitations")
-public class InvitationController {
+public class MyInvitationController {
 
     private final EnterpriseInvitationService enterpriseInvitationService;
 
-    public InvitationController(EnterpriseInvitationService enterpriseInvitationService) {
+    public MyInvitationController(EnterpriseInvitationService enterpriseInvitationService) {
         this.enterpriseInvitationService = enterpriseInvitationService;
     }
 

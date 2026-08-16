@@ -5,8 +5,12 @@ import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
 import io.github.qwertyhgb.knowflow.common.exception.ErrorCode;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
+import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseRoleStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRoleMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRolePermissionMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -16,6 +20,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.server.RequestPath;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ServletRequestPathUtils;
@@ -25,6 +31,7 @@ import org.springframework.web.util.pattern.PathPatternParser;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.stream.Collectors;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -40,8 +47,12 @@ import tools.jackson.databind.json.JsonMapper;
  *   <li>请求头与路径中的企业 ID 不一致 → 400 {@code ENTERPRISE_CONTEXT_MISMATCH}
  *       （防止「以 A 企业上下文调用 B 企业接口」的越权尝试）；</li>
  *   <li>当前用户不是目标企业的正常成员 → 403；</li>
- *   <li>校验通过 → 重建认证主体，填入 {@code currentEnterpriseId} 与成员角色，
- *       下游 Controller 可从 {@link EnterpriseUser} 直接读取。</li>
+ *   <li>成员关联的角色不存在或被禁用 → 403（成员已无可用角色，按无权限拒绝）；</li>
+ *   <li>校验通过 → 重建认证主体，填入 {@code currentEnterpriseId} 与成员角色编码
+ *       （{@code enterprise_role.code}），
+ *       并把该角色拥有的权限码写入 {@code Authentication.getAuthorities()}，
+ *       供 {@code @PreAuthorize("hasAuthority('member:remove')")} 等声明式接口鉴权匹配。
+ *       下游 Controller 可从 {@link EnterpriseUser} 直接读取企业上下文。</li>
  * </ul>
  *
  * <p>不匹配企业路径的请求（注册/登录、我的企业列表、被邀请人视角的邀请接口等）
@@ -72,10 +83,19 @@ public class EnterpriseContextFilter extends OncePerRequestFilter {
 
     private final EnterpriseMemberMapper enterpriseMemberMapper;
 
+    private final EnterpriseRoleMapper enterpriseRoleMapper;
+
+    private final EnterpriseRolePermissionMapper enterpriseRolePermissionMapper;
+
     private final JsonMapper jsonMapper;
 
-    public EnterpriseContextFilter(EnterpriseMemberMapper enterpriseMemberMapper, JsonMapper jsonMapper) {
+    public EnterpriseContextFilter(EnterpriseMemberMapper enterpriseMemberMapper,
+                                   EnterpriseRoleMapper enterpriseRoleMapper,
+                                   EnterpriseRolePermissionMapper enterpriseRolePermissionMapper,
+                                   JsonMapper jsonMapper) {
         this.enterpriseMemberMapper = enterpriseMemberMapper;
+        this.enterpriseRoleMapper = enterpriseRoleMapper;
+        this.enterpriseRolePermissionMapper = enterpriseRolePermissionMapper;
         this.jsonMapper = jsonMapper;
     }
 
@@ -123,12 +143,47 @@ public class EnterpriseContextFilter extends OncePerRequestFilter {
             return;
         }
 
-        // 6. 校验通过：重建认证主体注入企业上下文（原主体不可变，不做就地修改）。
+        // 6. 读取成员关联角色的权限码，作为接口鉴权（@PreAuthorize hasAuthority）的依据。
+        if (member.getRoleId() == null) {
+            // 防御性分支：理论上不发生，V6 迁移已为所有成员回填 role_id 并设为非空。
+            log.warn("event=member_role_missing enterpriseId={} userId={}",
+                    headerEnterpriseId, currentUser.userId());
+            writeError(response, ErrorCode.FORBIDDEN);
+            return;
+        }
+
+        // 6.1 角色必须存在且处于正常状态：角色被删除或禁用时成员不应再获得任何权限。
+        EnterpriseRole role = enterpriseRoleMapper.selectById(member.getRoleId());
+        if (role == null || role.getStatus() != EnterpriseRoleStatus.NORMAL) {
+            log.warn("event=role_disabled_or_missing roleId={} enterpriseId={} userId={}",
+                    member.getRoleId(), headerEnterpriseId, currentUser.userId());
+            writeError(response, ErrorCode.FORBIDDEN);
+            return;
+        }
+
+        List<String> permissionCodes;
+        try {
+            permissionCodes = enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(member.getRoleId());
+        } catch (RuntimeException ex) {
+            // 权限加载失败按「无权限」拒绝；只记 WARN 与异常类型，不记录异常内容（日志白名单）。
+            log.warn("event=permission_load_failed roleId={} errorType={}",
+                    member.getRoleId(), ex.getClass().getSimpleName());
+            writeError(response, ErrorCode.FORBIDDEN);
+            return;
+        }
+
+        // 7. 重建认证主体：保留原 principal（含企业上下文），authorities 替换为角色权限码。
+        //    为什么把权限码放进 Authentication：Spring Security 的 @PreAuthorize
+        //    "hasAuthority('member:remove')" 直接从 Authentication.getAuthorities() 匹配，
+        //    这样企业作用域内每个接口都能用声明式注解完成鉴权，无需在 Controller 手写判断。
+        List<GrantedAuthority> authorities = permissionCodes.stream()
+                .map(SimpleGrantedAuthority::new)
+                .collect(Collectors.toList());
         SecurityContextHolder.getContext().setAuthentication(
                 new UsernamePasswordAuthenticationToken(
-                        currentUser.withEnterprise(headerEnterpriseId, member.getMemberRole()),
+                        currentUser.withEnterprise(headerEnterpriseId, role.getCode()),
                         null,
-                        authentication.getAuthorities()));
+                        authorities));
         chain.doFilter(request, response);
     }
 

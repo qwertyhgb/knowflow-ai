@@ -10,6 +10,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.http.MediaType;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -36,6 +37,16 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("NOT_FOUND"))
                 .andExpect(jsonPath("$.message").value("知识库不存在"));
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenAccessDenied() throws Exception {
+        // @PreAuthorize 校验失败抛出的 AccessDeniedException 子类，应转为 403 + FORBIDDEN。
+        mockMvc.perform(get("/_test/denied"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"))
+                .andExpect(jsonPath("$.message").value("没有操作权限"))
+                .andExpect(jsonPath("$.data").doesNotExist());
     }
 
     @Test
@@ -97,6 +108,11 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/_test/business")
         public Result<Void> businessError() {
             throw new BusinessException(ErrorCode.NOT_FOUND, "知识库不存在");
+        }
+
+        @GetMapping("/_test/denied")
+        public Result<Void> denied() {
+            throw new AccessDeniedException("权限不足");
         }
 
         @GetMapping("/_test/unexpected")

@@ -8,10 +8,13 @@ import io.github.qwertyhgb.knowflow.enterprise.dto.request.DepartmentStatusUpdat
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.DepartmentUpdateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseDepartment;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseDepartmentStatus;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
+import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseRoleStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRoleMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRolePermissionMapper;
 import io.github.qwertyhgb.knowflow.enterprise.service.DepartmentService;
 import io.github.qwertyhgb.knowflow.enterprise.vo.DepartmentTreeVO;
 import org.junit.jupiter.api.BeforeEach;
@@ -61,14 +64,32 @@ class DepartmentControllerTest {
     @MockitoBean
     private EnterpriseMemberMapper enterpriseMemberMapper;
 
+    /**
+     * EnterpriseContextFilter 校验通过后按角色加载权限码注入 authorities，
+     * 默认桩返回全部企业权限码，满足本类所有管理接口的 @PreAuthorize 校验；
+     * 个别「无权限 403」用例会覆盖此桩为空列表。
+     */
+    @MockitoBean
+    private EnterpriseRolePermissionMapper enterpriseRolePermissionMapper;
+
+    /**
+     * EnterpriseContextFilter 校验通过后按 roleId 查询成员角色（enterprise_role），
+     * 默认桩返回正常 OWNER 角色，满足过滤器的主体重建。
+     */
+    @MockitoBean
+    private EnterpriseRoleMapper enterpriseRoleMapper;
+
     @BeforeEach
     void stubEnterpriseContext() {
         EnterpriseMember member = new EnterpriseMember();
         member.setEnterpriseId(10L);
         member.setUserId(7L);
-        member.setMemberRole(EnterpriseMemberRole.OWNER);
         member.setStatus(EnterpriseMemberStatus.NORMAL);
+        // role_id 必须非空：V6 后成员必关联角色，过滤器据此加载权限码。
+        member.setRoleId(100L);
         when(enterpriseMemberMapper.selectOne(any())).thenReturn(member);
+        when(enterpriseRoleMapper.selectById(100L)).thenReturn(role("OWNER"));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(allPermissionCodes());
     }
 
     @Test
@@ -367,6 +388,77 @@ class DepartmentControllerTest {
                 .andExpect(jsonPath("$.message").value("请先移动或删除子部门"));
     }
 
+    // -------------------- @PreAuthorize 无权限 403 --------------------
+
+    @Test
+    void shouldReturnForbiddenWhenCreatingDepartmentWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
+        // 覆盖共享桩：角色无 department:create 权限 → @PreAuthorize 校验失败 → 403。
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(post("/api/enterprises/10/departments")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": "研发部"}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(departmentService);
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenUpdatingDepartmentWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(put("/api/enterprises/10/departments/100")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": "平台研发部", "parentId": null, "sortOrder": 8}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(departmentService);
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenUpdatingDepartmentStatusWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(put("/api/enterprises/10/departments/100/status")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status": "DISABLED"}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(departmentService);
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenDeletingDepartmentWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(delete("/api/enterprises/10/departments/100")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(departmentService);
+    }
+
     private void assertInvalidRequest(String content) throws Exception {
         when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(7L));
 
@@ -413,5 +505,24 @@ class DepartmentControllerTest {
 
         DepartmentTreeVO childNode = DepartmentTreeVO.from(child, List.of());
         return List.of(DepartmentTreeVO.from(root, List.of(childNode)));
+    }
+
+    /** V6 预置的全部企业权限码：作为共享桩返回，使各管理接口的 @PreAuthorize 校验通过。 */
+    private List<String> allPermissionCodes() {
+        return List.of(
+                "enterprise:update", "member:view", "member:remove", "member:status",
+                "invitation:create", "invitation:list", "invitation:revoke",
+                "department:create", "department:update", "department:delete", "department:status");
+    }
+
+    /** 构造企业角色记录（供 EnterpriseContextFilter 按 roleId 解析角色编码）。 */
+    private EnterpriseRole role(String code) {
+        EnterpriseRole role = new EnterpriseRole();
+        role.setId(100L);
+        role.setEnterpriseId(10L);
+        role.setCode(code);
+        role.setName(code);
+        role.setStatus(EnterpriseRoleStatus.NORMAL);
+        return role;
     }
 }

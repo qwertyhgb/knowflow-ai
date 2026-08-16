@@ -12,13 +12,17 @@ import io.github.qwertyhgb.knowflow.enterprise.dto.request.InvitationAcceptReque
 import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseInvitation;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseInvitationStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
+import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseRoleStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseInvitationMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRoleMapper;
+import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseMembershipChecker;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseInvitationVO;
 import io.github.qwertyhgb.knowflow.user.entity.User;
 import io.github.qwertyhgb.knowflow.user.enums.UserStatus;
@@ -58,7 +62,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * 创建成员邀请的单元测试：冻结 Clock 断言时间与令牌哈希，
- * 覆盖权限分层、邮箱归一化、重复邀请与惰性过期等业务规则。
+ * 覆盖角色分层、邮箱归一化、重复邀请与惰性过期等业务规则。
  */
 @ExtendWith(MockitoExtension.class)
 class EnterpriseInvitationServiceImplTest {
@@ -68,6 +72,11 @@ class EnterpriseInvitationServiceImplTest {
     /** 与 application.yml 的 invitation-ttl 一致，期望过期时间据此计算。 */
     private static final Duration TTL = Duration.ofDays(7);
 
+    /** 内置角色 ID 桩：OWNER / ADMIN / MEMBER（企业角色记录由 enterpriseRoleMapper 桩提供）。 */
+    private static final Long OWNER_ROLE_ID = 100L;
+    private static final Long ADMIN_ROLE_ID = 200L;
+    private static final Long MEMBER_ROLE_ID = 300L;
+
     @Mock
     private EnterpriseMapper enterpriseMapper;
 
@@ -76,6 +85,9 @@ class EnterpriseInvitationServiceImplTest {
 
     @Mock
     private EnterpriseInvitationMapper enterpriseInvitationMapper;
+
+    @Mock
+    private EnterpriseRoleMapper enterpriseRoleMapper;
 
     @Mock
     private UserMapper userMapper;
@@ -89,14 +101,19 @@ class EnterpriseInvitationServiceImplTest {
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(new MybatisConfiguration(), "test");
         TableInfoHelper.initTableInfo(assistant, EnterpriseInvitation.class);
         TableInfoHelper.initTableInfo(assistant, EnterpriseMember.class);
+        TableInfoHelper.initTableInfo(assistant, EnterpriseRole.class);
     }
 
     @BeforeEach
     void setUp() {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        // 使用真实 checker（内部走 enterpriseMapper / enterpriseMemberMapper 两个 mock），
+        // 保持既有 exists / selectOne 桩的语义不变。
+        EnterpriseMembershipChecker membershipChecker =
+                new EnterpriseMembershipChecker(enterpriseMapper, enterpriseMemberMapper);
         invitationService = new EnterpriseInvitationServiceImpl(
                 enterpriseMapper, enterpriseMemberMapper, enterpriseInvitationMapper,
-                userMapper, clock, TTL);
+                enterpriseRoleMapper, userMapper, membershipChecker, clock, TTL);
     }
 
     @Test
@@ -202,14 +219,20 @@ class EnterpriseInvitationServiceImplTest {
     }
 
     @Test
-    void shouldRejectWhenInviterIsPlainMember() {
+    void shouldAllowPlainMemberToInvite() {
+        // MEMBER 角色也能发起邀请：管理权限由 Controller 的 @PreAuthorize 校验，
+        // Service 只保证成员身份，不再按角色拒绝（分层规则仍限制不能邀请 OWNER/ADMIN）。
         when(enterpriseMapper.selectById(1L)).thenReturn(enterprise());
         when(enterpriseMemberMapper.selectOne(any()))
                 .thenReturn(member(EnterpriseMemberRole.MEMBER, EnterpriseMemberStatus.NORMAL));
+        when(enterpriseRoleMapper.selectById(MEMBER_ROLE_ID))
+                .thenReturn(roleEntity(EnterpriseMemberRole.MEMBER));
+        when(userMapper.selectById(7L)).thenReturn(user(7L, "member@example.com"));
+        when(enterpriseInvitationMapper.insert(any(EnterpriseInvitation.class))).thenReturn(1);
 
-        BusinessException ex = assertThrows(BusinessException.class,
-                () -> invitationService.createInvitation(7L, 1L, request("a@example.com", EnterpriseMemberRole.MEMBER)));
-        assertEquals(ErrorCode.FORBIDDEN, ex.getErrorCode(), "普通成员无权发起邀请");
+        invitationService.createInvitation(7L, 1L, request("a@example.com", EnterpriseMemberRole.MEMBER));
+
+        verify(enterpriseInvitationMapper).insert(any(EnterpriseInvitation.class));
     }
 
     @Test
@@ -228,6 +251,9 @@ class EnterpriseInvitationServiceImplTest {
         when(enterpriseMapper.selectById(1L)).thenReturn(enterprise());
         when(enterpriseMemberMapper.selectOne(any()))
                 .thenReturn(member(EnterpriseMemberRole.ADMIN, EnterpriseMemberStatus.NORMAL));
+        // 分层规则按 roleId 关联的 enterprise_role.code 判断邀请人角色。
+        when(enterpriseRoleMapper.selectById(ADMIN_ROLE_ID))
+                .thenReturn(roleEntity(EnterpriseMemberRole.ADMIN));
 
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> invitationService.createInvitation(7L, 1L, request("a@example.com", EnterpriseMemberRole.ADMIN)));
@@ -312,19 +338,22 @@ class EnterpriseInvitationServiceImplTest {
         when(enterpriseInvitationMapper.selectOne(any()))
                 .thenReturn(invitation(EnterpriseInvitationStatus.PENDING, NOW.plus(Duration.ofDays(1))));
         when(userMapper.selectById(7L)).thenReturn(user(7L, "invitee@example.com"));
+        // 邀请授予 MEMBER 角色：接受时按「企业 + 角色编码」查询目标企业的内置角色 ID。
+        when(enterpriseRoleMapper.selectOne(any()))
+                .thenReturn(roleEntity(EnterpriseMemberRole.MEMBER));
         when(enterpriseMemberMapper.insert(any(EnterpriseMember.class))).thenReturn(1);
         when(enterpriseInvitationMapper.update(any(EnterpriseInvitation.class), anyInvitationWrapper()))
                 .thenReturn(1);
 
         EnterpriseInvitationVO result = invitationService.acceptInvitation(7L, acceptRequest("a".repeat(32)));
 
-        // —— 成员关系断言 ——
+        // —— 成员关系断言：角色经 roleId 关联邀请授予的角色 ——
         ArgumentCaptor<EnterpriseMember> memberCaptor = ArgumentCaptor.forClass(EnterpriseMember.class);
         verify(enterpriseMemberMapper).insert(memberCaptor.capture());
         EnterpriseMember savedMember = memberCaptor.getValue();
         assertEquals(1L, savedMember.getEnterpriseId(), "成员应加入邀请指向的企业");
         assertEquals(7L, savedMember.getUserId());
-        assertEquals(EnterpriseMemberRole.MEMBER, savedMember.getMemberRole(), "角色应取邀请时授予的角色");
+        assertEquals(MEMBER_ROLE_ID, savedMember.getRoleId(), "角色应取邀请时授予的角色对应 ID");
         assertEquals(EnterpriseMemberStatus.NORMAL, savedMember.getStatus());
         assertEquals(NOW, savedMember.getJoinedAt());
         assertEquals(NOW, savedMember.getCreatedAt());
@@ -440,6 +469,9 @@ class EnterpriseInvitationServiceImplTest {
         when(enterpriseInvitationMapper.selectOne(any()))
                 .thenReturn(invitation(EnterpriseInvitationStatus.PENDING, NOW.plus(Duration.ofDays(1))));
         when(userMapper.selectById(7L)).thenReturn(user(7L, "invitee@example.com"));
+        // 接受前按「企业 + 邀请角色」查询目标企业的内置角色 ID。
+        when(enterpriseRoleMapper.selectOne(any()))
+                .thenReturn(roleEntity(EnterpriseMemberRole.MEMBER));
         // 并发场景：第 5 步检查通过后，另一请求已插入成员关系，本请求撞唯一索引。
         when(enterpriseMemberMapper.insert(any(EnterpriseMember.class)))
                 .thenThrow(new DuplicateKeyException("duplicate member"));
@@ -456,6 +488,8 @@ class EnterpriseInvitationServiceImplTest {
         when(enterpriseInvitationMapper.selectOne(any()))
                 .thenReturn(invitation(EnterpriseInvitationStatus.PENDING, NOW.plus(Duration.ofDays(1))));
         when(userMapper.selectById(7L)).thenReturn(user(7L, "invitee@example.com"));
+        when(enterpriseRoleMapper.selectOne(any()))
+                .thenReturn(roleEntity(EnterpriseMemberRole.MEMBER));
         when(enterpriseMemberMapper.insert(any(EnterpriseMember.class))).thenReturn(1);
         when(enterpriseInvitationMapper.update(any(EnterpriseInvitation.class), anyInvitationWrapper()))
                 .thenReturn(0);
@@ -516,14 +550,16 @@ class EnterpriseInvitationServiceImplTest {
     }
 
     @Test
-    void shouldRejectListingByPlainMember() {
+    void shouldAllowPlainMemberToListInvitations() {
+        // MEMBER 角色也能查看邀请列表：管理权限由 @PreAuthorize 校验，Service 只校验成员身份。
         when(enterpriseMapper.selectById(1L)).thenReturn(enterprise());
         when(enterpriseMemberMapper.selectOne(any()))
                 .thenReturn(member(EnterpriseMemberRole.MEMBER, EnterpriseMemberStatus.NORMAL));
+        when(enterpriseInvitationMapper.selectList(any())).thenReturn(List.of());
 
-        BusinessException ex = assertThrows(BusinessException.class,
-                () -> invitationService.listEnterpriseInvitations(7L, 1L));
-        assertEquals(ErrorCode.FORBIDDEN, ex.getErrorCode(), "普通成员无权查看邀请列表");
+        List<EnterpriseInvitationVO> result = invitationService.listEnterpriseInvitations(7L, 1L);
+
+        assertTrue(result.isEmpty(), "正常成员（含 MEMBER）应可查看邀请列表");
     }
 
     // -------------------- 我的待处理邀请 --------------------
@@ -609,14 +645,20 @@ class EnterpriseInvitationServiceImplTest {
     }
 
     @Test
-    void shouldRejectRevokingByPlainMember() {
+    void shouldAllowPlainMemberToRevoke() {
+        // MEMBER 角色也能撤销邀请：管理权限由 @PreAuthorize 校验，Service 只校验成员身份。
         when(enterpriseMapper.selectById(1L)).thenReturn(enterprise());
         when(enterpriseMemberMapper.selectOne(any()))
                 .thenReturn(member(EnterpriseMemberRole.MEMBER, EnterpriseMemberStatus.NORMAL));
+        when(enterpriseInvitationMapper.selectOne(any()))
+                .thenReturn(invitation(EnterpriseInvitationStatus.PENDING, NOW.plus(Duration.ofDays(1))));
+        when(enterpriseInvitationMapper.update(any(EnterpriseInvitation.class), anyInvitationWrapper()))
+                .thenReturn(1);
 
-        BusinessException ex = assertThrows(BusinessException.class,
-                () -> invitationService.revokeInvitation(7L, 1L, 100L));
-        assertEquals(ErrorCode.FORBIDDEN, ex.getErrorCode(), "普通成员无权撤销邀请");
+        EnterpriseInvitationVO result = invitationService.revokeInvitation(7L, 1L, 100L);
+
+        assertEquals(EnterpriseInvitationStatus.REVOKED, result.getStatus(),
+                "正常成员（含 MEMBER）应可撤销邀请");
     }
 
     @Test
@@ -673,8 +715,11 @@ class EnterpriseInvitationServiceImplTest {
     }
 
     /**
-     * 桩掉撤销邀请的前置上下文：企业存在、当前用户（7L）是 OWNER 管理成员、
+     * 桩掉撤销邀请的前置上下文：企业存在、当前用户（7L）是 OWNER 正常成员、
      * 目标邀请（100L）存在。各测试在此基础上按需补充 updateById 等后续桩。
+     *
+     * <p>撤销流程只校验成员身份（不解析角色），因此这里不需要 enterpriseRoleMapper 桩；
+     * member() 设置的 roleId 仅是成员记录数据，不会触发角色查询。</p>
      */
     private void stubRevokeContext(EnterpriseInvitationStatus status, Instant expiresAt) {
         when(enterpriseMapper.selectById(1L)).thenReturn(enterprise());
@@ -692,6 +737,7 @@ class EnterpriseInvitationServiceImplTest {
         when(enterpriseMapper.selectById(1L)).thenReturn(enterprise());
         when(enterpriseMemberMapper.selectOne(any()))
                 .thenReturn(member(role, EnterpriseMemberStatus.NORMAL));
+        when(enterpriseRoleMapper.selectById(roleIdOf(role))).thenReturn(roleEntity(role));
         when(userMapper.selectById(7L)).thenReturn(user(7L, "owner@example.com"));
     }
 
@@ -709,9 +755,30 @@ class EnterpriseInvitationServiceImplTest {
         member.setId(10L);
         member.setEnterpriseId(1L);
         member.setUserId(7L);
-        member.setMemberRole(role);
+        // 角色经 roleId 关联 enterprise_role（V3 的 member_role 列已退役）。
+        member.setRoleId(roleIdOf(role));
         member.setStatus(status);
         return member;
+    }
+
+    /** 内置角色枚举 → 角色 ID 桩。 */
+    private Long roleIdOf(EnterpriseMemberRole role) {
+        return switch (role) {
+            case OWNER -> OWNER_ROLE_ID;
+            case ADMIN -> ADMIN_ROLE_ID;
+            case MEMBER -> MEMBER_ROLE_ID;
+        };
+    }
+
+    /** 构造企业角色记录（编码即角色语义，供 roleId → code 解析）。 */
+    private EnterpriseRole roleEntity(EnterpriseMemberRole role) {
+        EnterpriseRole enterpriseRole = new EnterpriseRole();
+        enterpriseRole.setId(roleIdOf(role));
+        enterpriseRole.setEnterpriseId(1L);
+        enterpriseRole.setCode(role.getValue());
+        enterpriseRole.setName(role.getValue());
+        enterpriseRole.setStatus(EnterpriseRoleStatus.NORMAL);
+        return enterpriseRole;
     }
 
     private User user(Long id, String email) {

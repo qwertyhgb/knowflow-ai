@@ -8,10 +8,13 @@ import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseMemberStatu
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseUpdateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
+import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseRoleStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRoleMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRolePermissionMapper;
 import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseService;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseMemberVO;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseVO;
@@ -64,14 +67,33 @@ class EnterpriseControllerTest {
     @MockitoBean
     private EnterpriseMemberMapper enterpriseMemberMapper;
 
+    /**
+     * EnterpriseContextFilter 校验通过后按成员角色（roleId → enterprise_role.code）
+     * 加载权限码注入 authorities，默认桩返回全部企业权限码，
+     * 满足本类所有企业作用域管理接口的 @PreAuthorize 校验；
+     * 个别「无权限 403」用例会覆盖此桩为空列表。
+     */
+    @MockitoBean
+    private EnterpriseRolePermissionMapper enterpriseRolePermissionMapper;
+
+    /**
+     * EnterpriseContextFilter 校验通过后按 roleId 查询成员角色（enterprise_role），
+     * 默认桩返回正常 OWNER 角色，满足过滤器的主体重建。
+     */
+    @MockitoBean
+    private EnterpriseRoleMapper enterpriseRoleMapper;
+
     @BeforeEach
     void stubEnterpriseContext() {
         EnterpriseMember member = new EnterpriseMember();
         member.setEnterpriseId(10L);
         member.setUserId(1L);
-        member.setMemberRole(EnterpriseMemberRole.OWNER);
         member.setStatus(EnterpriseMemberStatus.NORMAL);
+        // role_id 必须非空：V6 后成员必关联角色，过滤器据此加载权限码。
+        member.setRoleId(100L);
         when(enterpriseMemberMapper.selectOne(any())).thenReturn(member);
+        when(enterpriseRoleMapper.selectById(100L)).thenReturn(role("OWNER"));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(allPermissionCodes());
     }
 
     @Test
@@ -545,7 +567,7 @@ class EnterpriseControllerTest {
                 .andExpect(jsonPath("$.data[0].userId").value(7))
                 .andExpect(jsonPath("$.data[0].email").value("alice@example.com"))
                 .andExpect(jsonPath("$.data[0].nickname").value("Alice"))
-                .andExpect(jsonPath("$.data[0].role").value("OWNER"))
+                .andExpect(jsonPath("$.data[0].roleCode").value("OWNER"))
                 .andExpect(jsonPath("$.data[0].status").value("NORMAL"))
                 .andExpect(jsonPath("$.data[0].joinedAt").value("2026-08-15T08:00:14.471Z"));
 
@@ -634,6 +656,76 @@ class EnterpriseControllerTest {
         verifyNoInteractions(enterpriseService);
     }
 
+    // -------------------- @PreAuthorize 无权限 403 --------------------
+
+    @Test
+    void shouldReturnForbiddenWhenUpdatingEnterpriseWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        // 覆盖共享桩：角色无 enterprise:update 权限 → @PreAuthorize 校验失败 → 403。
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(put("/api/enterprises/10")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "name": "新企业名"
+                                }
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        // 方法级鉴权在进入 Controller 方法前失败，业务层不应被调用。
+        verifyNoInteractions(enterpriseService);
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenListingMembersWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/enterprises/10/members")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(enterpriseService);
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenRemovingMemberWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(post("/api/enterprises/10/members/8/remove")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(enterpriseService);
+    }
+
+    @Test
+    void shouldReturnForbiddenWhenUpdatingMemberStatusWithoutPermission() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        when(enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(any())).thenReturn(List.of());
+
+        mockMvc.perform(put("/api/enterprises/10/members/8/status")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status": "DISABLED"}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+
+        verifyNoInteractions(enterpriseService);
+    }
+
     private EnterpriseVO enterpriseVO() {
         Enterprise enterprise = new Enterprise();
         enterprise.setId(1L);
@@ -651,7 +743,6 @@ class EnterpriseControllerTest {
         member.setId(1L);
         member.setEnterpriseId(10L);
         member.setUserId(7L);
-        member.setMemberRole(EnterpriseMemberRole.OWNER);
         member.setStatus(EnterpriseMemberStatus.NORMAL);
         // 带纳秒精度的时间，验证序列化层统一收敛为毫秒精度 ISO-8601 UTC。
         member.setJoinedAt(Instant.parse("2026-08-15T08:00:14.471987654Z"));
@@ -659,7 +750,7 @@ class EnterpriseControllerTest {
         User user = new User();
         user.setEmail("alice@example.com");
         user.setNickname("Alice");
-        return EnterpriseMemberVO.from(member, user);
+        return EnterpriseMemberVO.from(member, "OWNER", user);
     }
 
     /** 构造一个被禁用成员的视图：状态 DISABLED，关联 bob 的公开信息。 */
@@ -668,13 +759,31 @@ class EnterpriseControllerTest {
         member.setId(2L);
         member.setEnterpriseId(10L);
         member.setUserId(8L);
-        member.setMemberRole(EnterpriseMemberRole.MEMBER);
         member.setStatus(EnterpriseMemberStatus.DISABLED);
         member.setJoinedAt(Instant.parse("2026-08-15T08:00:14.471987654Z"));
 
         User user = new User();
         user.setEmail("bob@example.com");
         user.setNickname("Bob");
-        return EnterpriseMemberVO.from(member, user);
+        return EnterpriseMemberVO.from(member, "MEMBER", user);
+    }
+
+    /** 构造企业角色记录（供 EnterpriseContextFilter 按 roleId 解析角色编码）。 */
+    private EnterpriseRole role(String code) {
+        EnterpriseRole role = new EnterpriseRole();
+        role.setId(100L);
+        role.setEnterpriseId(10L);
+        role.setCode(code);
+        role.setName(code);
+        role.setStatus(EnterpriseRoleStatus.NORMAL);
+        return role;
+    }
+
+    /** V6 预置的全部企业权限码：作为共享桩返回，使各管理接口的 @PreAuthorize 校验通过。 */
+    private List<String> allPermissionCodes() {
+        return List.of(
+                "enterprise:update", "member:view", "member:remove", "member:status",
+                "invitation:create", "invitation:list", "invitation:revoke",
+                "department:create", "department:update", "department:delete", "department:status");
     }
 }

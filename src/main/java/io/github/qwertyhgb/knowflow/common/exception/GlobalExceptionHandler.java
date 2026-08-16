@@ -4,6 +4,7 @@ import io.github.qwertyhgb.knowflow.common.response.Result;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -47,6 +48,21 @@ public class GlobalExceptionHandler {
         ErrorCode errorCode = ex.getErrorCode();
         log.warn("event=business_exception code={}", errorCode.getCode());
         return failure(errorCode, ex.getMessage());
+    }
+
+    /**
+     * 方法级鉴权失败（@PreAuthorize 校验不通过）。
+     *
+     * <p>Spring Security 6 的方法级安全实际抛出 {@code AuthorizationDeniedException}，
+     * 它是本类处理的 {@link AccessDeniedException} 的子类，因此处理父类即可。
+     * 该异常在 Controller 方法执行前抛出，属于可预期的权限拒绝，而非未预期错误：
+     * 统一转为 403 + {@link ErrorCode#FORBIDDEN}，记 WARN 且不输出堆栈
+     * （与 {@link BusinessException} 的处理风格一致，不按兜底异常记 ERROR）。</p>
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Result<Void>> handleAccessDenied(AccessDeniedException ex) {
+        log.warn("event=access_denied");
+        return failure(ErrorCode.FORBIDDEN);
     }
 
     /**

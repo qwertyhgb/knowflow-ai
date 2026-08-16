@@ -9,13 +9,16 @@ import io.github.qwertyhgb.knowflow.enterprise.dto.request.InvitationAcceptReque
 import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseInvitation;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
+import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseInvitationStatus;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberRole;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseInvitationMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;
+import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseRoleMapper;
 import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseInvitationService;
+import io.github.qwertyhgb.knowflow.enterprise.service.EnterpriseMembershipChecker;
 import io.github.qwertyhgb.knowflow.enterprise.vo.EnterpriseInvitationVO;
 import io.github.qwertyhgb.knowflow.user.entity.User;
 import io.github.qwertyhgb.knowflow.user.mapper.UserMapper;
@@ -44,10 +47,11 @@ import java.util.stream.Collectors;
  *
  * <p><strong>创建邀请流程：</strong></p>
  * <ol>
- *   <li>校验企业存在（404）与邀请人身份：必须是该企业的正常成员（403），
- *       且角色为 OWNER 或 ADMIN（MEMBER 无权邀请，403）。</li>
+ *   <li>校验企业存在（404）与邀请人身份：必须是该企业的正常成员（403）。
+ *       管理权限（invitation:create）由 Controller 的 @PreAuthorize 按权限码校验。</li>
  *   <li>校验授予角色的分层规则：OWNER 角色不可通过邀请授予；
- *       ADMIN 只能邀请 MEMBER，仅 OWNER 可邀请 ADMIN（越权返回 403）。</li>
+ *       ADMIN 只能邀请 MEMBER，仅 OWNER 可邀请 ADMIN（越权返回 403，
+ *       邀请人角色经 role_id 关联的 enterprise_role.code 判断）。</li>
  *   <li>归一化被邀请邮箱（去首尾空白 + 转小写，与注册逻辑一致），
  *       拒绝邀请自己（400）。</li>
  *   <li>若该邮箱对应已注册用户且已有该企业成员关系（含 DISABLED），拒绝重复邀请（409）。</li>
@@ -74,7 +78,13 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
 
     private final EnterpriseInvitationMapper enterpriseInvitationMapper;
 
+    /** 企业角色表 Mapper：接受邀请时按邀请角色查询目标企业角色 ID。 */
+    private final EnterpriseRoleMapper enterpriseRoleMapper;
+
     private final UserMapper userMapper;
+
+    /** 企业成员身份校验（企业存在 → 404；正常成员 → 403），与成员/部门模块共用。 */
+    private final EnterpriseMembershipChecker membershipChecker;
 
     /**
      * 可注入的 UTC 时钟，用于生成 {@code expiresAt} / {@code createdAt} / {@code updatedAt}：
@@ -91,7 +101,9 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
     public EnterpriseInvitationServiceImpl(EnterpriseMapper enterpriseMapper,
                                            EnterpriseMemberMapper enterpriseMemberMapper,
                                            EnterpriseInvitationMapper enterpriseInvitationMapper,
+                                           EnterpriseRoleMapper enterpriseRoleMapper,
                                            UserMapper userMapper,
+                                           EnterpriseMembershipChecker membershipChecker,
                                            Clock clock,
                                            @Value("${knowflow.enterprise.invitation-ttl:7d}") Duration invitationTtl) {
         if (invitationTtl == null || invitationTtl.isZero() || invitationTtl.isNegative()) {
@@ -100,7 +112,9 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
         this.enterpriseMapper = enterpriseMapper;
         this.enterpriseMemberMapper = enterpriseMemberMapper;
         this.enterpriseInvitationMapper = enterpriseInvitationMapper;
+        this.enterpriseRoleMapper = enterpriseRoleMapper;
         this.userMapper = userMapper;
+        this.membershipChecker = membershipChecker;
         this.clock = clock;
         this.invitationTtl = invitationTtl;
     }
@@ -109,11 +123,13 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
     @Transactional
     public EnterpriseInvitationVO createInvitation(Long userId, Long enterpriseId,
                                                    EnterpriseInvitationCreateRequest request) {
-        // 1. 企业必须存在 + 邀请人必须是该企业的管理成员（正常状态且角色为 OWNER/ADMIN）：
+        // 1. 企业必须存在 + 邀请人必须是该企业的正常成员：
         //    先校验资源存在再做权限判断，避免把「不存在」误报成「无权限」；
-        //    两条规则被列表、撤销接口复用，抽取为私有方法（requireEnterprise / requireManagerMember）。
-        requireEnterprise(enterpriseId);
-        EnterpriseMember inviterMember = requireManagerMember(userId, enterpriseId);
+        //    创建邀请的权限（invitation:create）由 Controller 的 @PreAuthorize 校验，
+        //    此处只保证成员身份，不再判断 OWNER/ADMIN 角色。
+        //    两条规则被列表、撤销接口复用，由 EnterpriseMembershipChecker 统一校验。
+        membershipChecker.requireEnterprise(enterpriseId);
+        EnterpriseMember inviterMember = membershipChecker.requireActiveMemberEntity(userId, enterpriseId);
 
         // 2. 角色分层校验（顺序：先校验邀请人资格，再校验目标角色）：
         EnterpriseMemberRole grantedRole = request.getRole();
@@ -122,7 +138,8 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         //    2.2 ADMIN 只能邀请 MEMBER；邀请 ADMIN 仅 OWNER 可为（分层规则）。
-        if (inviterMember.getMemberRole() == EnterpriseMemberRole.ADMIN
+        //        邀请人角色经 roleId 关联的 enterprise_role.code 判断（member_role 列已退役）。
+        if ("ADMIN".equals(roleCodeOf(inviterMember.getRoleId()))
                 && grantedRole == EnterpriseMemberRole.ADMIN) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
@@ -131,8 +148,12 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
         //    否则「注册时的小写邮箱」与「邀请时的大小写混用邮箱」将无法匹配。
         String inviteeEmail = normalizeEmail(request.getEmail());
 
-        // 邀请人邮箱用于「不能邀请自己」校验；成员关系的外键已保证该用户存在。
+        // 邀请人邮箱用于「不能邀请自己」校验；成员关系的外键已保证该用户存在，
+        // 此处仅做防御性判空（异常数据/外键未生效时兜底，避免 NPE 变成 500）。
         User inviterUser = userMapper.selectById(userId);
+        if (inviterUser == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND);
+        }
         if (inviteeEmail.equals(inviterUser.getEmail())) {
             throw new BusinessException(ErrorCode.SELF_INVITATION_NOT_ALLOWED);
         }
@@ -229,11 +250,12 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
             throw new BusinessException(ErrorCode.INVITEE_ALREADY_MEMBER);
         }
 
-        // 5. 建立成员关系：角色取邀请时授予的角色，字段组装与企业创建流程同构。
+        // 5. 建立成员关系：角色取邀请时授予的角色，关联为目标企业的对应内置角色 ID
+        //    （V6 起角色以 role_id 为准，V3 的 member_role 列已退役）。
         EnterpriseMember member = new EnterpriseMember();
         member.setEnterpriseId(invitation.getEnterpriseId());
         member.setUserId(userId);
-        member.setMemberRole(invitation.getMemberRole());
+        member.setRoleId(roleIdOf(invitation.getEnterpriseId(), invitation.getMemberRole()));
         member.setStatus(EnterpriseMemberStatus.NORMAL);
         member.setJoinedAt(now);
         member.setCreatedAt(now);
@@ -279,9 +301,10 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
     @Override
     @Transactional
     public List<EnterpriseInvitationVO> listEnterpriseInvitations(Long userId, Long enterpriseId) {
-        // 权限：企业存在（404）+ 当前用户是管理成员（403），与创建邀请一致。
-        requireEnterprise(enterpriseId);
-        requireManagerMember(userId, enterpriseId);
+        // 权限：企业存在（404）+ 当前用户是正常成员（403），与创建邀请一致。
+        // 查看邀请列表的权限（invitation:list）由 Controller 的 @PreAuthorize 校验。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMemberEntity(userId, enterpriseId);
 
         // 列表返回前批量收敛该企业已经到期的 PENDING 邀请，避免管理端长期看到过时状态。
         Instant now = clock.instant();
@@ -355,9 +378,10 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
     @Override
     @Transactional
     public EnterpriseInvitationVO revokeInvitation(Long userId, Long enterpriseId, Long invitationId) {
-        // 1. 权限：企业存在（404）+ 当前用户是管理成员（403），与创建/列表一致。
-        requireEnterprise(enterpriseId);
-        requireManagerMember(userId, enterpriseId);
+        // 1. 权限：企业存在（404）+ 当前用户是正常成员（403），与创建/列表一致。
+        //    撤销邀请的权限（invitation:revoke）由 Controller 的 @PreAuthorize 校验。
+        membershipChecker.requireEnterprise(enterpriseId);
+        membershipChecker.requireActiveMemberEntity(userId, enterpriseId);
 
         // 2. 按「企业 + 邀请 ID」双重条件定位：邀请不存在或不属于该企业统一返回 404，
         //    不泄露其他企业的邀请存在性。
@@ -480,41 +504,25 @@ public class EnterpriseInvitationServiceImpl implements EnterpriseInvitationServ
     }
 
     /**
-     * 查询企业，不存在时抛 404。
-     *
-     * <p>统一「资源不存在」的判定，供创建、列表、撤销复用，
-     * 保证错误码与校验顺序（先资源后权限）在各接口一致。</p>
+     * 查询角色编码；角色 ID 为空或角色记录不存在时返回 null。
      */
-    private Enterprise requireEnterprise(Long enterpriseId) {
-        Enterprise enterprise = enterpriseMapper.selectById(enterpriseId);
-        if (enterprise == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND);
+    private String roleCodeOf(Long roleId) {
+        if (roleId == null) {
+            return null;
         }
-        return enterprise;
+        EnterpriseRole role = enterpriseRoleMapper.selectById(roleId);
+        return role == null ? null : role.getCode();
     }
 
     /**
-     * 校验当前用户是该企业的<strong>管理成员</strong>，否则抛 403。
-     *
-     * <p>管理成员 = 成员关系存在、状态正常、角色为 OWNER 或 ADMIN。
-     * 创建邀请、邀请列表、撤销邀请共用此规则（邀请信息比成员列表更敏感，
-     * 因此与「查看成员列表」的权限不同——后者仅要求正常成员）。</p>
-     *
-     * <p>返回成员关系实体，供调用方继续做角色相关的细化判断
-     * （如创建邀请时的 ADMIN 分层规则）。</p>
+     * 按「企业 + 角色枚举」查询内置角色 ID（接受邀请时把邀请授予的角色
+     * 映射为成员关联的 {@code roleId}）。内置角色由企业创建流程或 V6 迁移预置，必存在。
      */
-    private EnterpriseMember requireManagerMember(Long userId, Long enterpriseId) {
-        EnterpriseMember member = enterpriseMemberMapper.selectOne(
-                new LambdaQueryWrapper<EnterpriseMember>()
-                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
-                        .eq(EnterpriseMember::getUserId, userId));
-        if (member == null || member.getStatus() != EnterpriseMemberStatus.NORMAL) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-        if (member.getMemberRole() != EnterpriseMemberRole.OWNER
-                && member.getMemberRole() != EnterpriseMemberRole.ADMIN) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
-        return member;
+    private Long roleIdOf(Long enterpriseId, EnterpriseMemberRole role) {
+        EnterpriseRole enterpriseRole = enterpriseRoleMapper.selectOne(
+                new LambdaQueryWrapper<EnterpriseRole>()
+                        .eq(EnterpriseRole::getEnterpriseId, enterpriseId)
+                        .eq(EnterpriseRole::getCode, role.getValue()));
+        return enterpriseRole.getId();
     }
 }
