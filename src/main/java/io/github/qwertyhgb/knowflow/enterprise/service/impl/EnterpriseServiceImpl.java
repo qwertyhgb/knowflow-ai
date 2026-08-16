@@ -273,6 +273,47 @@ public class EnterpriseServiceImpl implements EnterpriseService {
 
     @Override
     @Transactional
+    public void leaveEnterprise(Long userId, Long enterpriseId) {
+        // 1. 企业必须存在：保持「先资源后权限」的全模块校验顺序。
+        requireEnterprise(enterpriseId);
+
+        // 2. 退出不需要管理员角色，只按「企业 + 当前用户 ID」查成员关系。
+        EnterpriseMember member = enterpriseMemberMapper.selectOne(
+                new LambdaQueryWrapper<EnterpriseMember>()
+                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
+                        .eq(EnterpriseMember::getUserId, userId));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND);
+        }
+
+        // 3. OWNER 不能主动退出，否则企业会失去所有者；这与管理员移除 OWNER 的语义不同。
+        if (member.getMemberRole() == EnterpriseMemberRole.OWNER) {
+            throw new BusinessException(ErrorCode.OWNER_CANNOT_LEAVE);
+        }
+
+        // 4. 已退出或已被移除的成员重复调用直接成功，不重复写入或刷新时间。
+        if (member.getStatus() == EnterpriseMemberStatus.DISABLED) {
+            return;
+        }
+
+        // 5. 软删除与管理员移除保持一致：保留加入记录，允许管理员恢复，
+        //    并复用现有成员状态接口重新启用，而不是物理删除成员关系。
+        Instant updatedAt = clock.instant();
+        int updatedCount = enterpriseMemberMapper.update(null,
+                new LambdaUpdateWrapper<EnterpriseMember>()
+                        .eq(EnterpriseMember::getId, member.getId())
+                        .eq(EnterpriseMember::getEnterpriseId, enterpriseId)
+                        .set(EnterpriseMember::getStatus, EnterpriseMemberStatus.DISABLED)
+                        .set(EnterpriseMember::getUpdatedAt, updatedAt));
+        if (updatedCount != 1) {
+            throw new BusinessException(ErrorCode.NOT_FOUND);
+        }
+
+        log.info("event=member_left enterpriseId={} userId={}", enterpriseId, userId);
+    }
+
+    @Override
+    @Transactional
     public EnterpriseMemberVO updateMemberStatus(Long userId, Long enterpriseId, Long targetUserId,
                                                  EnterpriseMemberStatusUpdateRequest request) {
         // 1. 企业必须存在 + 当前用户是管理成员：与移除成员共用同一套前置校验。

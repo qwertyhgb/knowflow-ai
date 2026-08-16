@@ -333,6 +333,36 @@ class EnterpriseControllerTest {
                 .andExpect(jsonPath("$.message").value("企业所有者不能被移除或禁用"));
     }
 
+    // -------------------- 成员主动退出 --------------------
+
+    @Test
+    void shouldLeaveEnterpriseWithValidToken() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+
+        mockMvc.perform(post("/api/enterprises/10/members/leave")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("SUCCESS"));
+
+        verify(enterpriseService).leaveEnterprise(1L, 10L);
+    }
+
+    @Test
+    void shouldRejectOwnerLeavingEnterprise() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        doThrow(new BusinessException(ErrorCode.OWNER_CANNOT_LEAVE))
+                .when(enterpriseService).leaveEnterprise(1L, 10L);
+
+        mockMvc.perform(post("/api/enterprises/10/members/leave")
+                        .header("Authorization", "Bearer valid-token")
+                        .header("X-Enterprise-Id", "10"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("OWNER_CANNOT_LEAVE"))
+                .andExpect(jsonPath("$.message")
+                        .value("企业所有者不能主动退出，当前阶段请先解散企业或移交所有权"));
+    }
+
     // -------------------- 修改成员状态 --------------------
 
     @Test

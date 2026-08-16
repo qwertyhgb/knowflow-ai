@@ -110,6 +110,20 @@ public class EnterpriseController {
     }
 
     /**
+     * 当前成员主动退出企业。
+     *
+     * <p>退出目标始终是当前登录用户，不接收 {@code targetUserId}，
+     * 与管理员移除其他成员的接口保持明确区分。</p>
+     */
+    @PostMapping("/{enterpriseId}/members/leave")
+    public Result<Void> leaveEnterprise(Authentication authentication,
+                                        @PathVariable Long enterpriseId) {
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
+        enterpriseService.leaveEnterprise(userId, enterpriseId);
+        return Result.success(null);
+    }
+
+    /**
      * 修改企业成员状态：启用（{@code NORMAL}）或禁用（{@code DISABLED}）目标成员。
      *
      * <p>仅允许该企业 OWNER 或 ADMIN 操作——MEMBER 无权；

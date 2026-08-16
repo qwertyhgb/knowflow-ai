@@ -96,6 +96,9 @@ public enum ErrorCode {
     /** 被移除或修改状态的成员是企业所有者（OWNER），固定 400。 */
     CANNOT_REMOVE_OWNER("CANNOT_REMOVE_OWNER", "企业所有者不能被移除或禁用", HttpStatus.BAD_REQUEST),
 
+    /** 企业所有者主动退出企业，固定 403。 */
+    OWNER_CANNOT_LEAVE("OWNER_CANNOT_LEAVE", "企业所有者不能主动退出，当前阶段请先解散企业或移交所有权", HttpStatus.FORBIDDEN),
+
     /** 访问企业作用域接口时未携带或无法解析 X-Enterprise-Id 请求头，固定 400。 */
     ENTERPRISE_CONTEXT_MISSING("ENTERPRISE_CONTEXT_MISSING", "缺少企业上下文，请指定当前企业", HttpStatus.BAD_REQUEST),
 

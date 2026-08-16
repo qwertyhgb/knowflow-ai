@@ -543,6 +543,75 @@ class EnterpriseServiceImplTest {
         verify(enterpriseMemberMapper, never()).selectOne(any());
     }
 
+    // -------------------- 成员主动退出 --------------------
+
+    @Test
+    void shouldAllowMemberToLeaveEnterprise() {
+        when(enterpriseMapper.selectById(10L)).thenReturn(enterprise(10L, "企业A", EnterpriseStatus.NORMAL));
+        EnterpriseMember member = member(2L, 10L, 7L);
+        member.setMemberRole(EnterpriseMemberRole.MEMBER);
+        when(enterpriseMemberMapper.selectOne(any())).thenReturn(member);
+        when(enterpriseMemberMapper.update(isNull(), anyMemberWrapper())).thenReturn(1);
+
+        enterpriseService.leaveEnterprise(7L, 10L);
+
+        ArgumentCaptor<LambdaUpdateWrapper<EnterpriseMember>> wrapperCaptor = ArgumentCaptor.captor();
+        verify(enterpriseMemberMapper).update(isNull(), wrapperCaptor.capture());
+        assertTrue(wrapperCaptor.getValue().getSqlSet().contains("status"),
+                "主动退出应更新成员状态");
+        assertTrue(wrapperCaptor.getValue().getSqlSegment().contains("enterprise_id"),
+                "主动退出更新应限定企业");
+    }
+
+    @Test
+    void shouldRejectOwnerLeavingEnterprise() {
+        when(enterpriseMapper.selectById(10L)).thenReturn(enterprise(10L, "企业A", EnterpriseStatus.NORMAL));
+        EnterpriseMember owner = member(1L, 10L, 7L);
+        owner.setMemberRole(EnterpriseMemberRole.OWNER);
+        when(enterpriseMemberMapper.selectOne(any())).thenReturn(owner);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> enterpriseService.leaveEnterprise(7L, 10L));
+
+        assertEquals(ErrorCode.OWNER_CANNOT_LEAVE, exception.getErrorCode());
+        verify(enterpriseMemberMapper, never()).update(isNull(), anyMemberWrapper());
+    }
+
+    @Test
+    void shouldBeIdempotentWhenLeavingDisabledMembership() {
+        when(enterpriseMapper.selectById(10L)).thenReturn(enterprise(10L, "企业A", EnterpriseStatus.NORMAL));
+        EnterpriseMember member = member(2L, 10L, 7L);
+        member.setStatus(EnterpriseMemberStatus.DISABLED);
+        when(enterpriseMemberMapper.selectOne(any())).thenReturn(member);
+
+        enterpriseService.leaveEnterprise(7L, 10L);
+
+        verify(enterpriseMemberMapper, never()).update(isNull(), anyMemberWrapper());
+    }
+
+    @Test
+    void shouldReturnNotFoundWhenLeavingWithoutMembership() {
+        when(enterpriseMapper.selectById(10L)).thenReturn(enterprise(10L, "企业A", EnterpriseStatus.NORMAL));
+        when(enterpriseMemberMapper.selectOne(any())).thenReturn(null);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> enterpriseService.leaveEnterprise(7L, 10L));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        verify(enterpriseMemberMapper, never()).update(isNull(), anyMemberWrapper());
+    }
+
+    @Test
+    void shouldReturnNotFoundBeforeMembershipCheckWhenLeavingUnknownEnterprise() {
+        when(enterpriseMapper.selectById(99L)).thenReturn(null);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> enterpriseService.leaveEnterprise(7L, 99L));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        verify(enterpriseMemberMapper, never()).selectOne(any());
+    }
+
     // -------------------- 修改成员状态 --------------------
 
     @Test

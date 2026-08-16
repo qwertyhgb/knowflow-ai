@@ -104,6 +104,17 @@ public interface EnterpriseService {
     void removeMember(Long userId, Long enterpriseId, Long targetUserId);
 
     /**
+     * 当前成员主动退出企业。
+     *
+     * <p>普通 MEMBER 也可以退出；OWNER 不允许主动退出，以避免企业失去所有者。
+     * 已经是 DISABLED 的成员重复调用按幂等成功处理。</p>
+     *
+     * @param userId       当前登录用户 ID，也是要退出的成员 ID
+     * @param enterpriseId 目标企业 ID
+     */
+    void leaveEnterprise(Long userId, Long enterpriseId);
+
+    /**
      * 修改企业成员状态：启用（{@code NORMAL}）或禁用（{@code DISABLED}）目标成员。
      *
      * <p><strong>与 {@link #removeMember} 的关系：</strong>移除成员是「置为
