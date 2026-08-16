@@ -5,6 +5,13 @@ spring:
     default: dev
   jackson:
     time-zone: UTC
+  # 数据库版本管理：应用启动时按序执行 classpath:db/migration 下的迁移脚本。
+  flyway:
+    # 默认关闭自动 baseline，避免误把未知的非空数据库标记为已迁移。
+    # 仅旧库首次接入且确认其结构已等同 V1 时，临时设置环境变量为 true。
+    baseline-on-migrate: ${KNOWFLOW_FLYWAY_BASELINE_ON_MIGRATE:false}
+    baseline-version: 1
+    locations: classpath:db/migration
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"
@@ -22,3 +29,6 @@ knowflow:
     # 自动续期阈值：剩余 TTL 不足此值时，认证流程顺带刷新 TTL。
     # 避免每次请求都写 Redis，仅在临近过期时触发。
     token-renew-threshold: 1d
+  enterprise:
+    # 成员邀请有效期：创建邀请时据此计算 expires_at。
+    invitation-ttl: 7d

@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.auth.filter;
 
+import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
 import io.github.qwertyhgb.knowflow.auth.token.BearerTokenExtractor;
 import io.github.qwertyhgb.knowflow.auth.token.TokenService;
 import jakarta.servlet.FilterChain;
@@ -39,9 +40,12 @@ public class TokenAuthenticationFilter extends OncePerRequestFilter {
         String token = BearerTokenExtractor.extract(request);
         if (token != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             tokenService.resolveUserId(token).ifPresent(userId -> {
-                // 暂无角色/权限体系，authorities 为空；后续接入权限时再扩展。
+                // 主体统一为 EnterpriseUser：此时只有 userId、无企业上下文；
+                // 企业作用域请求随后由 EnterpriseContextFilter 校验并注入企业上下文。
+                // 暂无额外的授权条目，authorities 为空；后续接入权限时再扩展。
                 UsernamePasswordAuthenticationToken authentication =
-                        new UsernamePasswordAuthenticationToken(userId, null, List.of());
+                        new UsernamePasswordAuthenticationToken(
+                                EnterpriseUser.withoutEnterprise(userId), null, List.of());
                 SecurityContext context = SecurityContextHolder.createEmptyContext();
                 context.setAuthentication(authentication);
                 SecurityContextHolder.setContext(context);

@@ -49,6 +49,18 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- 数据库版本管理：Flyway 负责在应用启动时按序执行 db/migration 下的迁移脚本。
+             Spring Boot 4 起 Flyway 自动配置移入独立的 starter，需显式引入。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+        </dependency>
+        <!-- Flyway 10+ 将 MySQL 支持拆分为独立模块，需显式引入 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

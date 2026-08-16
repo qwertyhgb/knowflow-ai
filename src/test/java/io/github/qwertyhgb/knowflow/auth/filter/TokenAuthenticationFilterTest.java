@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.auth.filter;
 
+import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
 import io.github.qwertyhgb.knowflow.auth.token.TokenService;
 import jakarta.servlet.FilterChain;
 import org.junit.jupiter.api.AfterEach;
@@ -44,7 +45,12 @@ class TokenAuthenticationFilterTest {
         new TokenAuthenticationFilter(tokenService)
                 .doFilter(request, new MockHttpServletResponse(), chain);
 
-        assertEquals(7L, SecurityContextHolder.getContext().getAuthentication().getPrincipal());
+        // 主体为 EnterpriseUser：Token 认证阶段只有 userId，企业上下文留待
+        // EnterpriseContextFilter 按需注入。
+        EnterpriseUser principal =
+                (EnterpriseUser) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+        assertEquals(7L, principal.userId());
+        assertNull(principal.currentEnterpriseId());
         assertEquals(1, chainInvocations.get());
         verify(tokenService).resolveUserId("valid-token");
     }
@@ -115,7 +121,9 @@ class TokenAuthenticationFilterTest {
                 .doFilter(request, new MockHttpServletResponse(), chain);
 
         // 认证仍应成功建立，主请求流程不应被续期失败影响。
-        assertEquals(7L, SecurityContextHolder.getContext().getAuthentication().getPrincipal());
+        EnterpriseUser principal =
+                (EnterpriseUser) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+        assertEquals(7L, principal.userId());
         assertEquals(1, chainInvocations.get());
     }
 }

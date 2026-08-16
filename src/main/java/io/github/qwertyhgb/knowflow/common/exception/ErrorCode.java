@@ -64,7 +64,58 @@ public enum ErrorCode {
     USER_DISABLED("USER_DISABLED", "账号已被禁用", HttpStatus.FORBIDDEN),
 
     /** 修改密码时当前密码错误。此场景下用户已登录，无需防范账号枚举，固定 400。 */
-    INVALID_PASSWORD("INVALID_PASSWORD", "当前密码错误", HttpStatus.BAD_REQUEST);
+    INVALID_PASSWORD("INVALID_PASSWORD", "当前密码错误", HttpStatus.BAD_REQUEST),
+
+    /** 创建企业邀请时，被邀请邮箱与当前用户自己的邮箱相同，固定 400。 */
+    SELF_INVITATION_NOT_ALLOWED("SELF_INVITATION_NOT_ALLOWED", "不能邀请自己加入企业", HttpStatus.BAD_REQUEST),
+
+    /** 创建或接受企业邀请时，目标用户已存在该企业成员关系（含禁用状态），固定 409。 */
+    INVITEE_ALREADY_MEMBER("INVITEE_ALREADY_MEMBER", "该用户已是企业成员", HttpStatus.CONFLICT),
+
+    /** 创建企业邀请时，该邮箱在同一企业已存在未过期的待接受邀请，固定 409。 */
+    INVITATION_ALREADY_PENDING("INVITATION_ALREADY_PENDING", "该邮箱已存在待接受的邀请", HttpStatus.CONFLICT),
+
+    /** 接受邀请时令牌不存在或无法定位邀请，固定 404。 */
+    INVITATION_NOT_FOUND("INVITATION_NOT_FOUND", "邀请不存在", HttpStatus.NOT_FOUND),
+
+    /** 接受邀请时邀请已超过有效期（含被惰性置为 EXPIRED 的情况），固定 400。 */
+    INVITATION_EXPIRED("INVITATION_EXPIRED", "邀请已过期", HttpStatus.BAD_REQUEST),
+
+    /** 接受邀请时该邀请已被接受，固定 409。 */
+    INVITATION_ALREADY_ACCEPTED("INVITATION_ALREADY_ACCEPTED", "邀请已被接受", HttpStatus.CONFLICT),
+
+    /** 接受邀请时该邀请已被邀请人撤销，固定 409。 */
+    INVITATION_REVOKED("INVITATION_REVOKED", "邀请已被撤销", HttpStatus.CONFLICT),
+
+    /** 接受邀请时当前登录邮箱与被邀请邮箱不一致，固定 403。 */
+    INVITATION_EMAIL_MISMATCH("INVITATION_EMAIL_MISMATCH", "当前登录邮箱与被邀请邮箱不一致", HttpStatus.FORBIDDEN),
+
+    /** 企业管理员试图移除自己，固定 403。 */
+    SELF_REMOVE_NOT_ALLOWED("SELF_REMOVE_NOT_ALLOWED", "您不能从企业中移除自己", HttpStatus.FORBIDDEN),
+
+    /** 被移除或修改状态的成员是企业所有者（OWNER），固定 400。 */
+    CANNOT_REMOVE_OWNER("CANNOT_REMOVE_OWNER", "企业所有者不能被移除或禁用", HttpStatus.BAD_REQUEST),
+
+    /** 访问企业作用域接口时未携带或无法解析 X-Enterprise-Id 请求头，固定 400。 */
+    ENTERPRISE_CONTEXT_MISSING("ENTERPRISE_CONTEXT_MISSING", "缺少企业上下文，请指定当前企业", HttpStatus.BAD_REQUEST),
+
+    /** X-Enterprise-Id 请求头与路径中的目标企业不一致，固定 400。 */
+    ENTERPRISE_CONTEXT_MISMATCH("ENTERPRISE_CONTEXT_MISMATCH", "企业上下文与目标企业不一致", HttpStatus.BAD_REQUEST),
+
+    /** 创建或更新部门时父部门不存在或不属于当前企业，固定 404。 */
+    DEPARTMENT_PARENT_NOT_FOUND("DEPARTMENT_PARENT_NOT_FOUND", "上级部门不存在", HttpStatus.NOT_FOUND),
+
+    /** 创建或更新部门时同一父部门下已存在同名部门，固定 409。 */
+    DEPARTMENT_NAME_ALREADY_EXISTS("DEPARTMENT_NAME_ALREADY_EXISTS", "同级部门名称已存在", HttpStatus.CONFLICT),
+
+    /** 更新或删除时目标部门不存在，或不属于当前企业，固定 404。 */
+    DEPARTMENT_NOT_FOUND("DEPARTMENT_NOT_FOUND", "部门不存在", HttpStatus.NOT_FOUND),
+
+    /** 更新父部门时会形成自身引用或祖先循环，固定 400。 */
+    DEPARTMENT_PARENT_CYCLE("DEPARTMENT_PARENT_CYCLE", "上级部门不能是当前部门或其子部门", HttpStatus.BAD_REQUEST),
+
+    /** 删除部门时仍存在子部门，固定 409。 */
+    DEPARTMENT_HAS_CHILDREN("DEPARTMENT_HAS_CHILDREN", "请先移动或删除子部门", HttpStatus.CONFLICT);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;

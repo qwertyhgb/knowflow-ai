@@ -161,16 +161,17 @@ user
 
 ### 1. 存放位置与命名
 
-- 所有数据库结构脚本统一存放于 `src/main/resources/db/schema/`，不散落在业务模块或项目根目录。
-- 文件名使用三位递增序号与清晰动作：`001_create_sys_user.sql`、`002_add_status_to_document.sql`。
-- 序号一经使用不得修改或复用；后续变更必须新增脚本，禁止直接修改已经执行过的历史脚本。
-- 当前目录仅用于版本管理和人工执行，项目尚未接入 Flyway/Liquibase，应用启动时不会自动执行其中的 SQL。
+- 所有数据库结构脚本统一存放于 `src/main/resources/db/migration/`，不散落在业务模块或项目根目录；应用启动时由 Flyway 按序自动执行（`spring.flyway.locations: classpath:db/migration`）。
+- 文件名遵循 Flyway 规范：`V{版本号}__{描述}.sql`，如 `V1__create_sys_user.sql`、`V2__add_status_to_document.sql`；版本号从 1 开始递增，不能跳号。
+- 已执行过的迁移脚本（含本仓库已发布的 V1）**禁止修改或复用**：Flyway 会用 checksum 校验，改历史脚本会导致校验失败；后续变更必须新增 `V{n+1}` 脚本。
+- 已有数据库首次接入 Flyway 时，先确认结构已等同 V1，再临时设置 `KNOWFLOW_FLYWAY_BASELINE_ON_MIGRATE=true`，并使用 `baseline-version: 1` 完成一次 baseline；创建迁移历史表后恢复默认 `false`，禁止长期全局开启自动 baseline。
+- 迁移脚本需同时兼容 MySQL 与 H2 测试库：MySQL 特有语法（`ENGINE`、`CHARSET`、`COLLATE`、`COMMENT`、`ON UPDATE` 等）用 MySQL 可执行注释 `/*! ... */` 包裹，H2 会忽略、MySQL 会执行，保证一份脚本两端可跑。
 
 ### 2. 建表与字段约定
 
 - 表名、字段名、索引名统一使用小写 `snake_case`；表名按模块使用明确前缀，例如 `sys_user`。
 - 每个表必须显式声明 `ENGINE = InnoDB`、`DEFAULT CHARSET = utf8mb4`、`COLLATE = utf8mb4_0900_ai_ci`，并为表和字段添加中文 `COMMENT`。
-- 主键默认使用 `BIGINT UNSIGNED NOT NULL AUTO_INCREMENT`；业务需要 UUID 时另行评估，不混用主键策略。
+- 主键默认使用 `BIGINT NOT NULL AUTO_INCREMENT`，与 Java 实体中的有符号 `Long` 范围保持一致；业务需要 UUID 时另行评估，不混用主键策略。
 - 涉及时间点的字段使用 `DATETIME(3)`，以 UTC 语义写入；命名使用 `created_at`、`updated_at`，与 Java `Instant` 对应。
 - 密码字段只保存哈希值，字段命名为 `password_hash`，禁止保存明文密码。
 

@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.user.controller;
 
+import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
 import io.github.qwertyhgb.knowflow.auth.token.BearerTokenExtractor;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
@@ -54,7 +55,8 @@ public class UserController {
      */
     @GetMapping("/me")
     public Result<UserVO> me(Authentication authentication) {
-        Long userId = (Long) authentication.getPrincipal();
+        // 认证主体为 EnterpriseUser（Token 认证建立）；/api/users/** 不属于企业作用域，企业上下文字段为 null。
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
         return Result.success(userService.getById(userId));
     }
 
@@ -64,7 +66,8 @@ public class UserController {
     @PatchMapping("/me")
     public Result<UserVO> updateProfile(Authentication authentication,
                                         @Valid @RequestBody UserProfileUpdateRequest request) {
-        Long userId = (Long) authentication.getPrincipal();
+        // 认证主体为 EnterpriseUser（Token 认证建立）；/api/users/** 不属于企业作用域，企业上下文字段为 null。
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
         return Result.success(userService.updateProfile(userId, request));
     }
 
@@ -74,7 +77,8 @@ public class UserController {
     @PutMapping("/me/password")
     public Result<Void> changePassword(Authentication authentication,
                                        @Valid @RequestBody UserChangePasswordRequest request) {
-        Long userId = (Long) authentication.getPrincipal();
+        // 认证主体为 EnterpriseUser（Token 认证建立）；/api/users/** 不属于企业作用域，企业上下文字段为 null。
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
         userService.changePassword(userId, request);
         return Result.success();
     }
@@ -84,7 +88,8 @@ public class UserController {
      */
     @PostMapping("/logout")
     public Result<Void> logout(Authentication authentication, HttpServletRequest request) {
-        Long userId = (Long) authentication.getPrincipal();
+        // 认证主体为 EnterpriseUser（Token 认证建立）；/api/users/** 不属于企业作用域，企业上下文字段为 null。
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
         userService.logout(userId, BearerTokenExtractor.extract(request));
         return Result.success();
     }
