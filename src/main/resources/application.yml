@@ -25,6 +25,36 @@ spring:
     port: ${KNOWFLOW_RABBITMQ_PORT:5672}
     username: guest
     password: guest
+    listener:
+      simple:
+        # 监听器重试（stateless 应用内重试，retry.stateless 默认即为 true）：
+        # 重试拦截器包住监听器调用，抛异常后在应用进程内反复调用监听方法；
+        # 整个重试期间消息在 broker 侧保持 unacked 状态、不离开队列——
+        # 与「抛异常 → requeue 回队列再投递」不同：不经过 broker 往返、
+        # 不会被其他消费者抢走，队列内消息顺序也不被重试打乱。
+        retry:
+          enabled: true
+          # 「首次尝试之后」的最大重试次数：2 次重试 + 1 次初始尝试 = 共 3 次尝试。
+          # 注意 Spring Boot 4 的改名与语义变化：3.x 的 max-attempts 统计「总尝试次数」，
+          # 4.0 起改名为 max-retries（max-attempts 已是 error 级弃用项，配置会导致启动失败），
+          # 底层接线改用 spring-core 的 RetryPolicy，其 maxRetries 只统计重试次数、
+          # 不含首次尝试。要维持「共 3 次尝试」的语义，这里配 2 而不是 3。
+          max-retries: 2
+          # 第一次重试前的等待时间（毫秒），其后每次等待按 multiplier 递增。
+          initial-interval: 1000
+          # 指数退避乘数：重试等待依次为 1s、2s、4s（受 max-interval 封顶）。
+          # 为什么不用固定间隔立刻重试：若故障源于下游短暂不可用（DB 宕机、网络抖动），
+          # 风暴式高频重试成功率低，还会给 broker 和数据库叠加无效负载、拖慢恢复；
+          # 逐次拉大间隔，给下游留出恢复时间。
+          multiplier: 2.0
+          # 重试间隔上限（毫秒），防止指数退避导致等待时间无限增长。
+          max-interval: 10000
+        # 关键配置：被拒绝的消息默认不重回原队列（Spring Boot 默认值是 true）。
+        # 重试耗尽后 recoverer 会拒绝消息；若此项保持 true，消息将被放回 parse-queue，
+        # 再次消费、再次失败、再次放回——形成无限 requeue 循环，死信队列永远收不到消息。
+        # 设为 false：被拒绝即离开原队列，broker 按 parse-queue 的死信配置
+        # （x-dead-letter-exchange，见 MqConfig）把消息转发到 DLX → DLQ 等待人工排查。
+        default-requeue-rejected: false
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"
@@ -55,3 +85,9 @@ knowflow:
     parse-exchange: knowflow.document.parse.exchange
     parse-queue: knowflow.document.parse.queue
     parse-routing-key: knowflow.document.parse
+    # 死信（Dead Letter）拓扑命名，沿用上面的命名约定。
+    # DLX 是死信专用交换器，DLQ 是失败消息的最终落脚点：
+    # 重试耗尽被拒绝的消息由 broker 自动转发到这里，等待人工排查。
+    parse-dlx: knowflow.document.parse.dlx
+    parse-dlq: knowflow.document.parse.dlq
+    parse-dlq-routing-key: knowflow.document.parse.dlq

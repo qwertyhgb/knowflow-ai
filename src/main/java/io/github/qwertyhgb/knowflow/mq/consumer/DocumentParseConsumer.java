@@ -19,25 +19,31 @@ import org.springframework.stereotype.Component;
  * （{@code POST .../parse}）保留完整权限校验作为外部入口。详见
  * {@code DocumentService} 接口对 {@code parseDocumentInternal} 的说明。</p>
  *
- * <p><strong>@RabbitListener 默认 AUTO 确认语义：</strong></p>
+ * <p><strong>@RabbitListener 默认 AUTO 确认语义（配合监听器重试）：</strong></p>
  * <ul>
  *   <li>方法正常返回 = 消息确认消费成功（broker 移除消息）；</li>
- *   <li>方法抛出异常 = 消息被判定为消费失败，broker 把它重新放回队列（requeue）。</li>
+ *   <li>方法抛出异常 = 消息被判定为消费失败，但启用了监听器重试后，异常会先被
+ *       重试拦截器捕获，在应用内重试（见 {@code application.yml} 的
+ *       {@code spring.rabbitmq.listener.simple.retry}）；重试耗尽仍失败才 reject——
+ *       因 {@code default-requeue-rejected: false}，消息不回原队列，
+ *       而是经 DLX 转发进死信队列（见 {@link DocumentParseDeadLetterConsumer}）。</li>
  * </ul>
  *
  * <p><strong>为什么捕获 {@link BusinessException} 而不抛出：</strong></p>
  * <ul>
  *   <li>业务异常属于<strong>可预期</strong>情况：例如消息被投递两次时，第二次文档已
  *       READY，状态机校验会抛 {@code DOCUMENT_STATUS_NOT_ALLOWED}——若抛出，
- *       AUTO 模式会无限 requeue 形成<strong>死循环</strong>；</li>
+ *       会白白消耗重试次数，最终还可能把「正常重复消息」送进死信队列；</li>
  *   <li>捕获后记 WARN 即视为消费成功，这正是「<strong>消费幂等</strong>」的处理方式：
- *       重复消息不重复解析、也不触发无限重试；</li>
+ *       重复消息不重复解析、也不触发重试与死信；</li>
  *   <li>解析本身失败（坏文件）不会抛异常：{@code parseDocumentInternal} 已把 FAILED
- *       作为正常终态返回，不会触发 requeue。</li>
+ *       作为正常终态返回，不会触发重试。</li>
  * </ul>
  *
- * <p><strong>真正不可预期的异常仍会抛出</strong>（如数据库宕机）：AUTO 模式会 requeue
- * 重试，这是它的兜底行为。重试次数限制与死信队列（DLQ）是下一步的进阶主题。</p>
+ * <p><strong>真正不可预期的异常仍会抛出</strong>（如数据库宕机）：这类异常进入
+ * 应用内重试（共 3 次尝试，指数退避）；若故障持续，重试耗尽后消息被拒绝并转入
+ * DLQ，由 {@link DocumentParseDeadLetterConsumer} 记录 ERROR 提醒人工排查。
+ * 业务异常（吞掉即成功）与意外异常（重试 → DLQ）的语义边界由此清晰分开。</p>
  */
 @Slf4j
 @Component
