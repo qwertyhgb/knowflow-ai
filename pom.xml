@@ -43,6 +43,15 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
+        <!-- Spring AMQP：Spring 生态操作 RabbitMQ 的标准入口，提供
+             RabbitTemplate（发送/接收）、@RabbitListener（注解式消费）、
+             自动配置（连接工厂、消息转换器等）。版本由 Spring Boot BOM 管理，不写版本号。
+             引入理由：文档解析异步化——上传后发消息，消费者在后台解析，
+             用户无需等待同步解析完成。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>

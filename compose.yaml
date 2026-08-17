@@ -1,3 +1,33 @@
+# 本地开发基础设施编排（Docker Compose）。
+#
+# 为什么 RabbitMQ 而非 Kafka（Phase 7 引入 MQ 的技术选型）：
+#   - RabbitMQ 的模型（Exchange / Queue / Routing Key / Binding）概念少、上手快，
+#     适合当前学习阶段理解「生产-交换机-队列-消费」的完整链路；
+#   - Kafka 定位是分布式日志流（分区、offset、重放），概念更多，更适合大数据/流处理场景；
+#   - 当前业务只是「上传文档 → 异步解析」这类低频可靠消息，RabbitMQ 足够，
+#     后续出现真正的流式场景再评估 Kafka。
+#
+# 关于 healthcheck（健康检查）：
+#   - compose 的 healthcheck 让 Docker 周期性探测服务是否真正就绪，而不仅是进程已启动；
+#   - 这里用 rabbitmq-diagnostics ping 探测 RabbitMQ 应用层是否可响应，
+#     供依赖方（应用/脚本）等待 healthy 后再连接，避免「容器起来了但服务未就绪」的竞态。
+#
+# 关于数据卷（volume）：
+#   - knowflow-rabbitmq-data 把 RabbitMQ 的持久化数据挂到命名卷，
+#     docker compose down/up 或删除容器后消息与元数据仍在；
+#     （依赖队列的 durable 与消息的 persistent 才能保证消息落盘，本步先搭好存储底座）
+#   - 容器是易失的，数据卷才是数据真正存放的地方——这是 Docker 的核心理念之一。
+#
+# 手动容器迁移说明：
+#   - 此前存在 docker run 手动创建的容器 knowflow-rabbitmq（端口 5672/15672）。
+#     docker run 与 compose 管理同一容器名会冲突，必须先停删旧容器，
+#     再由 compose 托管（命名卷 + healthcheck 等编排能力是 docker run 没有的）。
+#   迁移命令（用户执行，勿由工具代跑）：
+#     docker stop knowflow-rabbitmq
+#     docker rm knowflow-rabbitmq
+#     docker compose up -d rabbitmq
+#     docker compose ps   # 等待 rabbitmq 显示 healthy
+
 services:
   mysql:
     image: mysql:8.4
@@ -19,5 +49,26 @@ services:
     ports:
       - "${KNOWFLOW_REDIS_PORT:-6379}:6379"
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: knowflow-rabbitmq
+    environment:
+      # 管理账号：本地开发默认 guest/guest。生产环境必须用环境变量覆盖并改强密码。
+      RABBITMQ_DEFAULT_USER: ${KNOWFLOW_RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${KNOWFLOW_RABBITMQ_PASS:-guest}
+    ports:
+      - "${KNOWFLOW_RABBITMQ_PORT:-5672}:5672"
+      # 管理界面（Web UI）：浏览器访问 http://localhost:15672 用 guest/guest 登录。
+      - "15672:15672"
+    volumes:
+      - knowflow-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
 volumes:
   knowflow-mysql-data:
+  knowflow-rabbitmq-data:

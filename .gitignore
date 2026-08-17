@@ -31,3 +31,9 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### KnowFlow ###
+# 运行时文件存储（本地磁盘），不入版本库
+data/files/
+# AI 工具工作日志
+.workbuddy/

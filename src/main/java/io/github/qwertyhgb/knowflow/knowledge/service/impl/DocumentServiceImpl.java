@@ -21,6 +21,8 @@ import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMapper;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMemberMapper;
 import io.github.qwertyhgb.knowflow.knowledge.service.DocumentService;
 import io.github.qwertyhgb.knowflow.knowledge.vo.DocumentVO;
+import io.github.qwertyhgb.knowflow.mq.message.DocumentParseMessage;
+import io.github.qwertyhgb.knowflow.mq.producer.DocumentParsePublisher;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -30,6 +32,8 @@ import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -56,7 +60,10 @@ import java.util.ArrayList;
  *   <li>文件校验：非空、扩展名白名单、大小上限；</li>
  *   <li>SHA-256 内容哈希（企业维度去重）；</li>
  *   <li>写入本地磁盘（事务<strong>外</strong>——磁盘操作无法随事务回滚）；</li>
- *   <li>数据库记录插入（事务内）；插入失败时手动清理已写磁盘文件。</li>
+ *   <li>数据库记录插入（事务内）；插入失败时手动清理已写磁盘文件；</li>
+ *   <li>事务提交成功后（{@code afterCommit}）发布文档解析消息——解析由 MQ 消费者
+ *       异步完成，上传接口立即返回，前端无需等待解析结果（异步解耦，见
+ *       {@link #uploadDocument} 内的竞态说明）。</li>
  * </ol>
  *
  * <p><strong>解析流程（parseDocument，教学点居中）：</strong></p>
@@ -91,6 +98,9 @@ public class DocumentServiceImpl implements DocumentService {
     /** 本地磁盘存储根目录，由配置项 {@code knowflow.storage.local-dir} 注入。 */
     private final String localDir;
 
+    /** 文档解析消息生产者：上传事务提交后发布解析消息，由 MQ 消费者异步解析。 */
+    private final DocumentParsePublisher parsePublisher;
+
     /** 白名单扩展名集（小写），用于文件类型校验。 */
     private static final Set<String> ALLOWED_EXTENSIONS = Set.of("pdf", "docx", "txt", "md");
 
@@ -117,7 +127,8 @@ public class DocumentServiceImpl implements DocumentService {
                                EnterpriseMemberMapper enterpriseMemberMapper,
                                EnterpriseRoleMapper enterpriseRoleMapper,
                                Clock clock,
-                               @Value("${knowflow.storage.local-dir}") String localDir) {
+                               @Value("${knowflow.storage.local-dir}") String localDir,
+                               DocumentParsePublisher parsePublisher) {
         this.documentMapper = documentMapper;
         this.knowledgeBaseMapper = knowledgeBaseMapper;
         this.knowledgeBaseMemberMapper = knowledgeBaseMemberMapper;
@@ -126,6 +137,7 @@ public class DocumentServiceImpl implements DocumentService {
         this.enterpriseRoleMapper = enterpriseRoleMapper;
         this.clock = clock;
         this.localDir = localDir;
+        this.parsePublisher = parsePublisher;
     }
 
     @Override
@@ -219,6 +231,41 @@ public class DocumentServiceImpl implements DocumentService {
             throw e;
         }
 
+        // 9. 事务提交成功后发布解析消息（异步解析的核心教学点）。
+        //    ---- 为什么不能在事务内直接 publish？----
+        //    uploadDocument 是 @Transactional 方法：若在事务提交前就发出消息，
+        //    消费者可能立即消费并查库，而此时事务尚未提交——查询看不到刚插入的文档
+        //    （selectOne 返回 null → DOCUMENT_NOT_FOUND → 被消费者当业务异常吞掉 →
+        //    文档永远停在 UPLOADED，永远不会被解析）。这就是经典的
+        //    「消息先于事务提交可见」竞态。
+        //    ---- 为什么 afterCommit 是标准解法？----
+        //    registerSynchronization 注册的回调在事务成功提交后才执行，此时数据库
+        //    已真正可见新记录，消费者查到的必然是已提交数据，竞态被彻底消除。
+        //    这是 Spring 生态处理「事务 + 消息」先后问题的标准做法。
+        //    ---- 上传接口语义变化 ----
+        //    返回即成功（status UPLOADED），解析在后台异步完成，前端无需等待——
+        //    这就是异步解耦带来的体验提升。
+        //    注：TransactionSynchronization 的 afterCommit 为默认空实现，用匿名类
+        //    只覆写它（不实现其他回调），语义聚焦：只关心提交后通知。
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    parsePublisher.publish(new DocumentParseMessage(
+                            document.getId(), document.getEnterpriseId(), document.getKnowledgeBaseId()));
+                } catch (RuntimeException ex) {
+                    // 消息发布失败（如 broker 短暂不可用）：事务已提交，上传本身成功。
+                    // 文档保持 UPLOADED，可后续通过手动解析接口（POST .../parse）补偿重试——
+                    // 这是手动接口的新职责：异步链路失败时的补偿机制（优雅降级 +
+                    // 最终一致性思维：一次发布失败不阻塞用户上传）。
+                    // 不会形成死循环：消费者具备幂等，重复消息/重复解析由状态机拦截。
+                    // 日志只记录文档标识与异常类型名（白名单），不记录异常 message。
+                    log.warn("event=document_parse_message_publish_failed documentId={} errorType={}",
+                            document.getId(), ex.getClass().getSimpleName());
+                }
+            }
+        });
+
         // 只记录系统标识，不记录文件名与路径——文件名是用户提交的自由文本，按日志白名单规范排除。
         log.info("event=document_uploaded enterpriseId={} knowledgeBaseId={} documentId={} "
                         + "uploaderId={} fileSize={}",
@@ -229,10 +276,23 @@ public class DocumentServiceImpl implements DocumentService {
     @Override
     @Transactional
     public Document parseDocument(Long userId, Long enterpriseId, Long knowledgeBaseId, Long documentId) {
-        // 1. 权限与上传一致：资源级 EDITOR/ADMIN 或企业级 OWNER/ADMIN。
+        // 1. 外部入口（带权限校验）：与上传一致，资源级 EDITOR/ADMIN 或企业级 OWNER/ADMIN。
+        //    任何人都可能调用 HTTP 接口（POST .../parse），所以必须校验权限，
+        //    防止越权触发他人知识库的解析。
         requireKnowledgeBaseEditor(userId, enterpriseId, knowledgeBaseId);
 
-        // 2. 用「id + enterpriseId + knowledgeBaseId」三条件定位文档，
+        // 2. 委托内部核心逻辑（无权限校验）——校验完成后业务逻辑与 MQ 消费者完全一致。
+        return parseDocumentInternal(enterpriseId, knowledgeBaseId, documentId);
+    }
+
+    @Override
+    @Transactional
+    public Document parseDocumentInternal(Long enterpriseId, Long knowledgeBaseId, Long documentId) {
+        // 本方法是解析核心逻辑（从 parseDocument 提取，方法体与重构前逐行一致），
+        // 不做权限校验：仅限可信内部调用者（MQ 消费者）使用。信任边界见接口 Javadoc——
+        // 队列内消息只来自本系统生产者，消费时没有登录用户概念。
+
+        // 1. 用「id + enterpriseId + knowledgeBaseId」三条件定位文档，
         //    从数据库层面防跨企业、跨知识库的越权解析。
         Document document = documentMapper.selectOne(
                 new LambdaQueryWrapper<Document>()
@@ -243,13 +303,13 @@ public class DocumentServiceImpl implements DocumentService {
             throw new BusinessException(ErrorCode.DOCUMENT_NOT_FOUND);
         }
 
-        // 3. 状态机校验：只有 UPLOADED 可解析。已 READY（解析完成）、FAILED（终态）、
+        // 2. 状态机校验：只有 UPLOADED 可解析。已 READY（解析完成）、FAILED（终态）、
         //    PARSING（瞬时态，正常流程读不到）都拒绝——防止重复解析产生覆盖或二次消耗。
         if (document.getStatus() != DocumentStatus.UPLOADED) {
             throw new BusinessException(ErrorCode.DOCUMENT_STATUS_NOT_ALLOWED);
         }
 
-        // 4. 磁盘文件存在性校验（先于 PARSING 落库）。
+        // 3. 磁盘文件存在性校验（先于 PARSING 落库）。
         //    文件缺失属于存储层异常，直接按 404 抛出——若先标记 PARSING 再抛错，
         //    文档会停留在无法恢复的瞬时态（PARSING 不在可解析范围内，将永远无法重试）。
         Path filePath = Paths.get(localDir, String.valueOf(enterpriseId),
@@ -258,7 +318,7 @@ public class DocumentServiceImpl implements DocumentService {
             throw new BusinessException(ErrorCode.DOCUMENT_FILE_MISSING);
         }
 
-        // 5. 提前落库标记 PARSING：解析可能耗时，先更新状态再执行解析，
+        // 4. 提前落库标记 PARSING：解析可能耗时，先更新状态再执行解析，
         //    使状态变化尽早可见、避免后续阶段重复解析（教学点：状态机先行落库）。
         //    当前学习阶段不做「条件更新 + 行锁」级别的并发防护，那是后续主题；
         //    本步已满足「同步解析 + 状态机」的教学目标。
@@ -267,14 +327,14 @@ public class DocumentServiceImpl implements DocumentService {
         document.setUpdatedAt(now);
         documentMapper.updateById(document);
 
-        // 6. 按扩展名分发解析（扩展名取自 storageKey，与上传白名单一致）。
+        // 5. 按扩展名分发解析（扩展名取自 storageKey，与上传白名单一致）。
         //    其他扩展名理论上被上传白名单挡住，此处防御性处理为解析失败。
         String ext = extensionOf(document.getStorageKey());
         if (!ALLOWED_EXTENSIONS.contains(ext)) {
             return markParsingFailed(document, documentId, REASON_UNSUPPORTED_FORMAT);
         }
 
-        // 7. 提取纯文本。
+        // 6. 提取纯文本。
         String content;
         try {
             content = extractText(filePath, ext);
@@ -285,7 +345,7 @@ public class DocumentServiceImpl implements DocumentService {
             return markParsingFailed(document, documentId, REASON_CORRUPTED_FILE);
         }
 
-        // 8. 解析成功：写入提取文本，状态机流转到 READY。
+        // 7. 解析成功：写入提取文本，状态机流转到 READY。
         //    failed_reason 显式置 NULL（虽因状态机不变量——只有 UPLOADED 能到 READY，
         //    而 UPLOADED 的 failed_reason 恒为 NULL——实际恒为空，仍保持语义清晰）。
         document.setContent(content);

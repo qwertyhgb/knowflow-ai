@@ -57,6 +57,11 @@ public class DocumentController {
      *
      * <p>接收 {@code multipart/form-data} 请求，文件通过 {@code file} 表单项上传。
      * 支持文件类型：pdf、docx、txt、md；单文件上限 10MB。</p>
+     *
+     * <p><strong>异步解析：</strong>上传成功后立即返回（{@code status} 为 UPLOADED），
+     * 解析由 MQ 消费者在后台异步完成，前端无需等待。若异步消息发布失败
+     * （如 broker 短暂不可用），文档仍保持 UPLOADED，可通过手动解析接口
+     * {@code POST .../parse} 补偿重试。</p>
      */
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Result<DocumentVO> uploadDocument(Authentication authentication,
@@ -134,9 +139,16 @@ public class DocumentController {
      * 手动触发文档解析：把文件内容提取为纯文本存入 {@code document.content}，
      * 状态机流转 UPLOADED → PARSING → READY / FAILED。
      *
-     * <p><strong>当前同步执行</strong>（教学决策）：请求会阻塞直到解析完成，响应
-     * {@code status} 即最终结果。Phase 7 引入 MQ 后本接口语义变为「提交解析任务」，
-     * 异步消费解析，届时返回的 {@code status} 为 PARSING，最终结果由后续查询获得。</p>
+     * <p><strong>同步执行：</strong>请求会阻塞直到解析完成，响应 {@code status}
+     * 即最终结果。</p>
+     *
+     * <p><strong>双重职责：</strong></p>
+     * <ol>
+     *   <li><strong>外部解析入口：</strong>用户手动触发文档解析；</li>
+     *   <li><strong>异步链路补偿：</strong>上传后若解析消息发布失败（文档停留在
+     *       UPLOADED 未被解析），可调用本接口补触发解析——这是异步链路失败时的
+     *       手动补偿机制（上传的异步发布失败见 {@code uploadDocument} 说明）。</li>
+     * </ol>
      *
      * <p><strong>权限：</strong>与上传一致，需知识库 EDITOR/ADMIN 或企业 OWNER/ADMIN；
      * 由 Service 按资源级校验，不加 {@code @PreAuthorize}。</p>

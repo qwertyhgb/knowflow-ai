@@ -78,8 +78,9 @@ public interface DocumentService {
      * <p><strong>权限：</strong>与上传一致，需知识库 EDITOR/ADMIN 或企业 OWNER/ADMIN
      * （{@code requireKnowledgeBaseEditor}，两级编辑者取或）。</p>
      *
-     * <p><strong>同步 vs 异步：</strong>当前阶段同步执行（教学决策）；Phase 7 引入 MQ 后
-     * 改为「提交解析任务」异步消费，本方法形态保持不变，只改调用方。</p>
+     * <p><strong>外部入口：</strong>本方法是带权限校验的外部入口，供 HTTP 接口
+     * （手动触发解析 {@code POST .../parse}）调用。内部核心逻辑见
+     * {@link #parseDocumentInternal(Long, Long, Long)}。</p>
      *
      * @param userId          当前登录用户 ID
      * @param enterpriseId    目标企业 ID
@@ -88,4 +89,20 @@ public interface DocumentService {
      * @return 解析后的文档实体（status 为 READY 或 FAILED）
      */
     Document parseDocument(Long userId, Long enterpriseId, Long knowledgeBaseId, Long documentId);
+
+    /**
+     * 解析文档（内部方法）：与 {@link #parseDocument(Long, Long, Long, Long)} 相同的
+     * 状态机逻辑，但<strong>不做任何权限校验</strong>。
+     *
+     * <p><strong>信任边界：</strong>本方法仅限可信内部调用者（MQ 消费者）使用——
+     * 队列内消息只来自本系统生产者、进入本系统声明的队列，消费时不存在「登录用户」概念，
+     * 因此无需（也无法）做用户级权限校验。外部访问（HTTP 接口）必须走带权限校验的
+     * {@link #parseDocument(Long, Long, Long, Long)}，禁止绕过权限直接调用本方法。</p>
+     *
+     * @param enterpriseId    目标企业 ID
+     * @param knowledgeBaseId 目标知识库 ID
+     * @param documentId      目标文档 ID
+     * @return 解析后的文档实体（status 为 READY 或 FAILED）
+     */
+    Document parseDocumentInternal(Long enterpriseId, Long knowledgeBaseId, Long documentId);
 }

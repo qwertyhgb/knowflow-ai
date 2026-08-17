@@ -17,6 +17,14 @@ spring:
       # 上传文件大小上限：Spring Boot 默认 1MB，调整为 10MB 以支持文档上传。
       max-file-size: 10MB
       max-request-size: 10MB
+  rabbitmq:
+    # 本地开发默认值，生产由环境变量覆盖（与 knowflow.* 配置风格一致）。
+    # guest 账号仅允许 localhost 连接是 RabbitMQ 的安全设计：默认 guest/guest
+    # 只能从本机连接，即使凭据泄露也无法从远程直连。
+    host: localhost
+    port: ${KNOWFLOW_RABBITMQ_PORT:5672}
+    username: guest
+    password: guest
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"
@@ -40,3 +48,10 @@ knowflow:
   storage:
     # 本地磁盘存储根目录（学习阶段不引入 MinIO/S3，后续可替换为对象存储）。
     local-dir: ./data/files
+  mq:
+    # 文档解析消息的 Exchange / Queue / Routing Key 命名。
+    # 命名约定：项目前缀（knowflow）.业务域（document）.用途（parse）。
+    # Exchange 与 Queue 由 MqConfig 声明式创建，此处仅集中管理名称，便于统一修改。
+    parse-exchange: knowflow.document.parse.exchange
+    parse-queue: knowflow.document.parse.queue
+    parse-routing-key: knowflow.document.parse

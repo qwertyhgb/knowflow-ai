@@ -24,6 +24,8 @@ import io.github.qwertyhgb.knowflow.knowledge.mapper.DocumentMapper;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMapper;
 import io.github.qwertyhgb.knowflow.knowledge.vo.DocumentVO;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMemberMapper;
+import io.github.qwertyhgb.knowflow.mq.message.DocumentParseMessage;
+import io.github.qwertyhgb.knowflow.mq.producer.DocumentParsePublisher;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -33,6 +35,7 @@ import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFRun;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +45,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -58,6 +63,7 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -65,6 +71,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -97,6 +104,9 @@ class DocumentServiceImplTest {
     @Mock
     private DocumentMapper documentMapper;
 
+    @Mock
+    private DocumentParsePublisher parsePublisher;
+
     private DocumentServiceImpl documentService;
 
     @BeforeAll
@@ -111,12 +121,22 @@ class DocumentServiceImplTest {
 
     @BeforeEach
     void setUp() {
+        // 激活事务同步上下文：uploadDocument 内部会调用
+        // TransactionSynchronizationManager.registerSynchronization 注册 afterCommit 回调，
+        // 纯 Mockito 单测默认同步未激活（INACTIVE），会抛 IllegalStateException。
+        TransactionSynchronizationManager.initSynchronization();
         EnterpriseMembershipChecker membershipChecker =
                 new EnterpriseMembershipChecker(enterpriseMapper, enterpriseMemberMapper);
         documentService = new DocumentServiceImpl(
                 documentMapper, knowledgeBaseMapper, knowledgeBaseMemberMapper,
                 membershipChecker, enterpriseMemberMapper, enterpriseRoleMapper,
-                Clock.fixed(NOW, ZoneOffset.UTC), tempDir.toString());
+                Clock.fixed(NOW, ZoneOffset.UTC), tempDir.toString(), parsePublisher);
+    }
+
+    @AfterEach
+    void tearDown() {
+        // 清理事务同步上下文，防止用例间残留的同步列表干扰（串扰防护）。
+        TransactionSynchronizationManager.clearSynchronization();
     }
 
     @Test
@@ -160,6 +180,23 @@ class DocumentServiceImplTest {
         assertEquals(NOW, result.getUpdatedAt());
 
         verify(documentMapper).insert(any(Document.class));
+
+        // ---- 异步解析消息发布（afterCommit 竞态解法）----
+        // 注册的同步在「事务提交时」才执行——纯 Mockito 单测没有真实事务，
+        // 手动触发 afterCommit 模拟「事务已提交完成」的那一刻。
+        assertFalse(TransactionSynchronizationManager.getSynchronizations().isEmpty(),
+                "上传成功应注册事务同步（afterCommit 里发布解析消息）");
+        TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit);
+
+        // 断言解析消息已发布且三字段正确：documentId / enterpriseId / knowledgeBaseId。
+        ArgumentCaptor<DocumentParseMessage> messageCaptor =
+                ArgumentCaptor.forClass(DocumentParseMessage.class);
+        verify(parsePublisher).publish(messageCaptor.capture());
+        DocumentParseMessage published = messageCaptor.getValue();
+        assertEquals(100L, published.documentId());
+        assertEquals(10L, published.enterpriseId());
+        assertEquals(100L, published.knowledgeBaseId());
     }
 
     @Test
@@ -381,6 +418,48 @@ class DocumentServiceImplTest {
         assertFalse(fileExists, "插入失败后应清理已写磁盘文件");
     }
 
+    @Test
+    void shouldNotPublishWhenUploadInsertFails() {
+        allowEditor();
+        byte[] content = "no-publish".getBytes();
+        MockMultipartFile file = new MockMultipartFile("file", "fail.pdf", "application/pdf", content);
+        when(documentMapper.exists(any())).thenReturn(false);
+        when(documentMapper.insert(any(Document.class))).thenThrow(new RuntimeException("DB error"));
+
+        assertThrows(RuntimeException.class,
+                () -> documentService.uploadDocument(7L, 10L, 100L, file));
+
+        // 插入失败：registerSynchronization 的代码路径未执行，解析消息绝不发布。
+        verify(parsePublisher, never()).publish(any(DocumentParseMessage.class));
+    }
+
+    @Test
+    void shouldPublishFailureNotBreakUpload() throws Exception {
+        allowEditor();
+        byte[] content = "graceful".getBytes();
+        MockMultipartFile file = new MockMultipartFile("file", "graceful.pdf", "application/pdf", content);
+        when(documentMapper.exists(any())).thenReturn(false);
+        when(documentMapper.insert(any(Document.class))).thenAnswer(invocation -> {
+            Document doc = invocation.getArgument(0);
+            doc.setId(300L);
+            return 1;
+        });
+        // 发布失败（如 broker 短暂不可用）：上传本身必须不受影响（优雅降级）。
+        doThrow(new RuntimeException("broker down"))
+                .when(parsePublisher).publish(any(DocumentParseMessage.class));
+
+        Document result = documentService.uploadDocument(7L, 10L, 100L, file);
+
+        // 上传成功、状态 UPLOADED、记录返回正常。
+        assertEquals(DocumentStatus.UPLOADED, result.getStatus());
+        assertEquals(300L, result.getId());
+
+        // 手动触发 afterCommit 模拟事务已提交：发布抛异常被吞掉，不向外传播——
+        // 这正是「发布失败不阻塞上传」的优雅降级逻辑（手动 parse 接口作为补偿）。
+        assertDoesNotThrow(() -> TransactionSynchronizationManager.getSynchronizations()
+                .forEach(TransactionSynchronization::afterCommit));
+    }
+
     // ==================== 文档列表测试 ====================
 
     @Test
@@ -572,7 +651,7 @@ class DocumentServiceImplTest {
         return new DocumentServiceImpl(
                 documentMapper, knowledgeBaseMapper, knowledgeBaseMemberMapper,
                 membershipChecker, enterpriseMemberMapper, enterpriseRoleMapper,
-                advancedClock, tempDir.toString());
+                advancedClock, tempDir.toString(), parsePublisher);
     }
 
     @Test
@@ -801,6 +880,46 @@ class DocumentServiceImplTest {
                 () -> documentService.parseDocument(7L, 10L, 100L, 208L));
 
         assertEquals(ErrorCode.DOCUMENT_FILE_MISSING, exception.getErrorCode());
+        verify(documentMapper, never()).updateById(any(Document.class));
+    }
+
+    // -------------------- parseDocumentInternal（无权限内部入口） --------------------
+    // 内部方法不做权限校验：以下用例不调用 allowEditor()/allowActiveMember() 等权限桩，
+    // 直接验证状态机与解析核心逻辑，与 parseDocument 的成功用例共享同一套断言。
+
+    @Test
+    void shouldParseInternalWithoutPermissionCheck() throws Exception {
+        // 不设任何权限桩：证明 parseDocumentInternal 不依赖权限校验即可完成解析。
+        Path targetDir = tempDir.resolve("10").resolve("100");
+        Files.createDirectories(targetDir);
+        String expectedContent = "internal parse content";
+        Files.writeString(targetDir.resolve("internal.txt"), expectedContent, StandardCharsets.UTF_8);
+
+        Document doc = document(300L, "internal.txt", "text/plain", (long) expectedContent.length());
+        doc.setStorageKey("internal.txt");
+        when(documentMapper.selectOne(any())).thenReturn(doc);
+
+        Document result = parseServiceWithAdvancedClock()
+                .parseDocumentInternal(10L, 100L, 300L);
+
+        // 与 parseDocument 成功用例一致：流转 READY、content 正确、无失败原因。
+        assertEquals(DocumentStatus.READY, result.getStatus());
+        assertEquals(expectedContent, result.getContent(), "内部解析结果应与原文一致");
+        assertNull(result.getFailedReason());
+        verify(documentMapper, times(2)).updateById(any(Document.class));
+    }
+
+    @Test
+    void shouldRejectInternalParseWhenDocumentAlreadyReady() {
+        // 同状态机校验：重复消息场景（第二次消费时文档已 READY）→ 抛 DOCUMENT_STATUS_NOT_ALLOWED。
+        Document doc = document(301L, "ready.txt", "text/plain", 10L);
+        doc.setStatus(DocumentStatus.READY);
+        when(documentMapper.selectOne(any())).thenReturn(doc);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> documentService.parseDocumentInternal(10L, 100L, 301L));
+
+        assertEquals(ErrorCode.DOCUMENT_STATUS_NOT_ALLOWED, exception.getErrorCode());
         verify(documentMapper, never()).updateById(any(Document.class));
     }
 
