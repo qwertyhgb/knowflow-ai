@@ -10,6 +10,7 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Objects;
@@ -115,6 +116,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Void>> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
         log.warn("event=request_media_type_not_supported contentType={}", ex.getContentType());
         return failure(ErrorCode.UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /**
+     * multipart 文件大小超限：Spring Boot 在 multipart 解析阶段触发此异常，早于
+     * Controller 参数校验。固定 400 + DOCUMENT_TOO_LARGE，记 WARN 不记堆栈
+     * （参照 AccessDeniedException 处理器风格：可预期的异常输入，不按兜底异常 ERROR 处理）。
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<Result<Void>> handleMaxUploadSizeExceeded(MaxUploadSizeExceededException ex) {
+        log.warn("event=upload_size_exceeded maxSize={}", ex.getMaxUploadSize());
+        return failure(ErrorCode.DOCUMENT_TOO_LARGE);
     }
 
     private ResponseEntity<Result<Void>> failure(ErrorCode errorCode) {

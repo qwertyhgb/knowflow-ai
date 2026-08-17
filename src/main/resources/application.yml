@@ -12,6 +12,11 @@ spring:
     baseline-on-migrate: ${KNOWFLOW_FLYWAY_BASELINE_ON_MIGRATE:false}
     baseline-version: 1
     locations: classpath:db/migration
+  servlet:
+    multipart:
+      # 上传文件大小上限：Spring Boot 默认 1MB，调整为 10MB 以支持文档上传。
+      max-file-size: 10MB
+      max-request-size: 10MB
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"
@@ -32,3 +37,6 @@ knowflow:
   enterprise:
     # 成员邀请有效期：创建邀请时据此计算 expires_at。
     invitation-ttl: 7d
+  storage:
+    # 本地磁盘存储根目录（学习阶段不引入 MinIO/S3，后续可替换为对象存储）。
+    local-dir: ./data/files

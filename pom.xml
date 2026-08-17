@@ -61,6 +61,24 @@
             <artifactId>flyway-mysql</artifactId>
         </dependency>
 
+        <!-- PDFBox：PDF 文本提取库（org.apache.pdfbox.pdftext.PDFTextStripper）。
+             PDF 是二进制格式，页面文本以对象/流形式内嵌，必须用专业解析库按结构读取，
+             不能像 TXT/MD 那样直接读字节当文本。引入理由：文档解析把 PDF 内容提取为
+             纯文本存入 document.content，作为后续搜索与 AI/RAG 的数据源。 -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.4</version>
+        </dependency>
+        <!-- Apache POI (poi-ooxml)：DOCX 文本提取库（org.apache.poi.xwpf.extractor.XWPFWordExtractor）。
+             DOCX 本质是 zip 包的 OOXML 容器，文档正文分散在 XML 部件中，必须用 POI 解包提取；
+             不能直接读字节或当作纯文本读取。引入理由：与 PDFBox 相同，为文档解析提供
+             DOCX → 纯文本的提取能力（poi-ooxml 自带核心 poi 与 xmlbeans、log4j-api 等传递依赖）。 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.4.1</version>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

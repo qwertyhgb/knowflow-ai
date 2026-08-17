@@ -131,7 +131,29 @@ public enum ErrorCode {
 
     /** 管理员试图修改或移除自己的知识库成员身份，固定 403（防止降级/退出后失去管理权）。 */
     KNOWLEDGE_BASE_SELF_OPERATION_NOT_ALLOWED("KNOWLEDGE_BASE_SELF_OPERATION_NOT_ALLOWED",
-            "不能修改或移除自己的知识库成员身份", HttpStatus.FORBIDDEN);
+            "不能修改或移除自己的知识库成员身份", HttpStatus.FORBIDDEN),
+
+    /** 上传文件为空（MultipartFile 为空或大小为 0），固定 400。 */
+    DOCUMENT_FILE_EMPTY("DOCUMENT_FILE_EMPTY", "上传文件不能为空", HttpStatus.BAD_REQUEST),
+
+    /** 上传文件扩展名不在白名单（pdf/docx/txt/md）中，固定 400。 */
+    DOCUMENT_TYPE_NOT_ALLOWED("DOCUMENT_TYPE_NOT_ALLOWED", "仅支持 pdf/docx/txt/md 文件", HttpStatus.BAD_REQUEST),
+
+    /** 文件大小超过 10MB 上限（multipart 解析阶段由 MaxUploadSizeExceededException 兜底），固定 400。 */
+    DOCUMENT_TOO_LARGE("DOCUMENT_TOO_LARGE", "文件大小超过10MB上限", HttpStatus.BAD_REQUEST),
+
+    /** 同一企业内已存在相同哈希内容的文档（企业维度去重），固定 409。 */
+    DOCUMENT_ALREADY_EXISTS("DOCUMENT_ALREADY_EXISTS", "该文件已上传过", HttpStatus.CONFLICT),
+
+    /** 文档不存在或不属于当前企业/知识库，固定 404。 */
+    DOCUMENT_NOT_FOUND("DOCUMENT_NOT_FOUND", "文档不存在", HttpStatus.NOT_FOUND),
+
+    /** 文档数据库记录存在但磁盘文件缺失（存储层异常），按 404 处理不泄露存储细节。 */
+    DOCUMENT_FILE_MISSING("DOCUMENT_FILE_MISSING", "文档文件已丢失", HttpStatus.NOT_FOUND),
+
+    /** 文档当前状态不允许解析（只有 UPLOADED 可解析；已 READY/FAILED/PARSING 均拒绝），
+     *  固定 409。PARSING 是瞬时态，正常流程不会读到；此错误码主要防止重复解析。 */
+    DOCUMENT_STATUS_NOT_ALLOWED("DOCUMENT_STATUS_NOT_ALLOWED", "当前状态不允许解析", HttpStatus.CONFLICT);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;
