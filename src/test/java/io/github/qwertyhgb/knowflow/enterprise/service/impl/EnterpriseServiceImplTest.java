@@ -56,10 +56,9 @@ class EnterpriseServiceImplTest {
 
     private static final Instant NOW = Instant.parse("2026-08-15T08:00:00Z");
 
-    /** 内置角色 ID 桩：OWNER / ADMIN / MEMBER（企业角色记录由 enterpriseRoleMapper 桩提供）。 */
+    /** 内置角色 ID 桩：OWNER / ADMIN（企业角色记录由 enterpriseRoleMapper 桩提供）。 */
     private static final Long OWNER_ROLE_ID = 100L;
     private static final Long ADMIN_ROLE_ID = 200L;
-    private static final Long MEMBER_ROLE_ID = 300L;
 
     @Mock
     private EnterpriseMapper enterpriseMapper;
@@ -368,7 +367,7 @@ class EnterpriseServiceImplTest {
         when(enterpriseMemberMapper.selectList(any())).thenReturn(List.of(owner, admin));
 
         // 批量查询角色编码（roleId → enterprise_role.code），供 VO 展示。
-        when(enterpriseRoleMapper.selectBatchIds(any())).thenReturn(List.of(
+        when(enterpriseRoleMapper.selectByIds(any())).thenReturn(List.of(
                 role(OWNER_ROLE_ID, "OWNER"), role(ADMIN_ROLE_ID, "ADMIN")));
 
         when(userMapper.selectByIds(any())).thenReturn(List.of(

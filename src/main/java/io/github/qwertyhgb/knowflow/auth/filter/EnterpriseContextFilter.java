@@ -102,57 +102,81 @@ public class EnterpriseContextFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws IOException, ServletException {
-        // 1. 尚未认证：直接放行，让认证入口点返回 401——先认证，再谈企业上下文。
+
+        // ========== 阶段 1：检查认证状态 ==========
+        // 从 SecurityContext 获取当前认证主体。只有经过 TokenAuthenticationFilter 认证的请求，
+        // 才会持有 EnterpriseUser 类型的 principal。
+        // 以下两种情况下直接放行，不再执行企业上下文校验：
+        //   a) authentication == null：未认证，交给 RestAuthenticationEntryPoint 返回 401
+        //   b) principal 不是 EnterpriseUser 类型：由其他认证机制建立的主体，本项目不处理
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null || !(authentication.getPrincipal() instanceof EnterpriseUser currentUser)) {
             chain.doFilter(request, response);
             return;
         }
 
-        // 2. 从路径解析目标企业 ID；非企业作用域请求（模式不匹配）原样放行。
+        // ========== 阶段 2：判断是否为企业作用域请求 ==========
+        // 通过路径模式匹配识别：只有 /api/enterprises/{enterpriseId} 及其子路径
+        // 被视为企业作用域（如 /api/enterprises/1/members）。
+        // 非企业作用域请求（如 /api/enterprises 列表接口、/api/users/me 等）直接放行。
         Long pathEnterpriseId = resolvePathEnterpriseId(request);
         if (pathEnterpriseId == null) {
             chain.doFilter(request, response);
             return;
         }
 
-        // 3. 企业作用域请求必须携带上下文请求头。
+        // ========== 阶段 3：请求头校验 ==========
+        // 企业作用域请求必须携带 X-Enterprise-Id 请求头，指明当前要操作哪个企业。
+        // 请求头缺失或值不是合法数字 → 400，明确告知调用方缺少上下文。
         Long headerEnterpriseId = parseEnterpriseId(request.getHeader(ENTERPRISE_ID_HEADER));
         if (headerEnterpriseId == null) {
             writeError(response, ErrorCode.ENTERPRISE_CONTEXT_MISSING);
             return;
         }
 
-        // 4. 请求头必须与路径目标企业一致，否则拒绝，防止跨企业上下文调用。
+        // ========== 阶段 4：上下文一致性校验 ==========
+        // 请求头中的企业 ID 必须与 URL 路径中的企业 ID 一致。
+        // 防止攻击者以「A 企业的上下文」调用「B 企业的接口」——这是最常见的多租户越权模式。
+        // 例如：X-Enterprise-Id: 1 访问 /api/enterprises/2/members 将被拒绝。
         if (!headerEnterpriseId.equals(pathEnterpriseId)) {
             writeError(response, ErrorCode.ENTERPRISE_CONTEXT_MISMATCH);
             return;
         }
 
-        // 5. 成员身份校验：必须是目标企业的正常成员（含角色，供主体注入）。
+        // ========== 阶段 5：成员身份校验 ==========
+        // 查询 enterprise_member 表，确认当前用户是目标企业的正常成员。
+        // 三个查询条件：
+        //   1) enterpriseId = 目标企业（来自请求头）
+        //   2) userId = 当前认证用户（来自 Token 认证阶段建立的 principal）
+        //   3) status = NORMAL（已邀请但未接受、已离职、已禁用的成员均不可操作）
         EnterpriseMember member = enterpriseMemberMapper.selectOne(
                 new LambdaQueryWrapper<EnterpriseMember>()
                         .eq(EnterpriseMember::getEnterpriseId, headerEnterpriseId)
                         .eq(EnterpriseMember::getUserId, currentUser.userId())
                         .eq(EnterpriseMember::getStatus, EnterpriseMemberStatus.NORMAL));
         if (member == null) {
-            // 日志只记录系统标识：上下文非法属于可预期的异常输入，记 WARN 不记堆栈。
+            // 日志只记录企业 ID 和用户 ID 等系统标识，不记录 PII。
+            // 上下文非法属于可预期的异常输入，记 WARN 不记堆栈，避免日志噪音。
             log.warn("event=enterprise_context_rejected enterpriseId={} userId={}",
                     headerEnterpriseId, currentUser.userId());
             writeError(response, ErrorCode.FORBIDDEN);
             return;
         }
 
-        // 6. 读取成员关联角色的权限码，作为接口鉴权（@PreAuthorize hasAuthority）的依据。
+        // ========== 阶段 6：角色与权限校验 ==========
+        // 6.1 成员必须关联角色：role_id 不能为空。
+        // 这是一个防御性分支——V6 数据库迁移已为所有成员回填 role_id 并改为非空约束。
+        // 保留此检查是为了应对数据库迁移遗漏或脚本回滚等极端情况。
         if (member.getRoleId() == null) {
-            // 防御性分支：理论上不发生，V6 迁移已为所有成员回填 role_id 并设为非空。
             log.warn("event=member_role_missing enterpriseId={} userId={}",
                     headerEnterpriseId, currentUser.userId());
             writeError(response, ErrorCode.FORBIDDEN);
             return;
         }
 
-        // 6.1 角色必须存在且处于正常状态：角色被删除或禁用时成员不应再获得任何权限。
+        // 6.2 角色必须处于正常状态：角色被删除或禁用时，该角色的所有成员应失去权限。
+        // 这里不检查角色是否存在于 enterprise_role 表中（selectById 返回 null 即不存在），
+        // 也不检查角色是否属于当前企业（角色表按 enterprise 隔离，SQL 层面已保证）。
         EnterpriseRole role = enterpriseRoleMapper.selectById(member.getRoleId());
         if (role == null || role.getStatus() != EnterpriseRoleStatus.NORMAL) {
             log.warn("event=role_disabled_or_missing roleId={} enterpriseId={} userId={}",
@@ -161,29 +185,45 @@ public class EnterpriseContextFilter extends OncePerRequestFilter {
             return;
         }
 
+        // 6.3 加载角色拥有的权限码列表。
+        // 权限码来自 permission 表，通过 enterprise_role_permission 关联表查询。
+        // 权限码示例：enterprise:update, member:remove, invitation:create 等。
+        // 加载失败（如数据库宕机）按「无权限」拒绝，日志仅记录异常类型，不包含 SQL 细节。
         List<String> permissionCodes;
         try {
             permissionCodes = enterpriseRolePermissionMapper.selectPermissionCodesByRoleId(member.getRoleId());
         } catch (RuntimeException ex) {
-            // 权限加载失败按「无权限」拒绝；只记 WARN 与异常类型，不记录异常内容（日志白名单）。
             log.warn("event=permission_load_failed roleId={} errorType={}",
                     member.getRoleId(), ex.getClass().getSimpleName());
             writeError(response, ErrorCode.FORBIDDEN);
             return;
         }
 
-        // 7. 重建认证主体：保留原 principal（含企业上下文），authorities 替换为角色权限码。
-        //    为什么把权限码放进 Authentication：Spring Security 的 @PreAuthorize
-        //    "hasAuthority('member:remove')" 直接从 Authentication.getAuthorities() 匹配，
-        //    这样企业作用域内每个接口都能用声明式注解完成鉴权，无需在 Controller 手写判断。
+        // ========== 阶段 7：重建认证主体 ==========
+        // 将权限码转换为 Spring Security 的 GrantedAuthority 对象。
+        // 这是多租户 RBAC 的核心：权限码被注入到 Authentication.getAuthorities() 中，
+        // 后续 Controller 方法上的 @PreAuthorize("hasAuthority('member:remove')") 注解
+        // 直接从 Authentication.getAuthorities() 匹配权限，无需在 Controller 中手写 if-else 判断。
+        // 这是一种声明式鉴权方案，比手动校验更简洁、更易维护。
         List<GrantedAuthority> authorities = permissionCodes.stream()
                 .map(SimpleGrantedAuthority::new)
                 .collect(Collectors.toList());
+
+        // 重建 UsernamePasswordAuthenticationToken：
+        //   - principal：从 EnterpriseUser.withoutEnterprise(userId) 升级为
+        //               EnterpriseUser.withEnterprise(enterpriseId, roleCode)，
+        //               携带了企业上下文信息，后续 Controller 可以直接从认证主体读取。
+        //   - credentials：保持 null（Token 认证，不传递密码凭证）。
+        //   - authorities：替换为当前角色的权限码列表（之前为空）。
         SecurityContextHolder.getContext().setAuthentication(
                 new UsernamePasswordAuthenticationToken(
                         currentUser.withEnterprise(headerEnterpriseId, role.getCode()),
                         null,
                         authorities));
+
+        // ========== 放行 ==========
+        // 此时 SecurityContext 中的 Authentication 已携带完整的企业上下文和权限信息，
+        // 后续 Filter 和 Controller 可以直接使用。
         chain.doFilter(request, response);
     }
 
@@ -194,17 +234,30 @@ public class EnterpriseContextFilter extends OncePerRequestFilter {
      * 解析失败同样返回 null 放行——该请求随后会因 Controller 的
      * {@code @PathVariable Long} 类型转换失败被全局异常处理兜底，
      * 保持与引入本过滤器前一致的行为。</p>
+     *
+     * <p>路径匹配逻辑：</p>
+     * <ul>
+     *   <li>{@code /api/enterprises/1} → 匹配模式 1，enterpriseId=1</li>
+     *   <li>{@code /api/enterprises/1/members} → 匹配模式 2，enterpriseId=1</li>
+     *   <li>{@code /api/enterprises}（列表接口）→ 不匹配任何模式，返回 null</li>
+     *   <li>{@code /api/enterprises/abc}（非法 ID）→ 匹配模式 1 或 2，但 parseEnterpriseId 返回 null</li>
+     * </ul>
      */
     private Long resolvePathEnterpriseId(HttpServletRequest request) {
-        // 安全过滤器链先于 DispatcherServlet 执行，解析结果缓存属性通常尚未写入；
-        // hasParsedRequestPath 判断后按需 parseAndCache（解析并缓存，后续环节可复用）。
+        // 安全过滤器链先于 DispatcherServlet 执行，此时 request 的 URI 解析缓存尚未写入。
+        // hasParsedRequestPath 判断后按需调用 parseAndCache：
+        //   - 若尚未解析 → 解析并缓存到 request 属性，后续 Filter/Interceptor/Controller 可复用
+        //   - 若已解析 → 跳过，避免重复解析开销
         if (!ServletRequestPathUtils.hasParsedRequestPath(request)) {
             ServletRequestPathUtils.parseAndCache(request);
         }
         RequestPath requestPath = ServletRequestPathUtils.getParsedRequestPath(request);
+        // 遍历预定义的企业作用域路径模式，提取 enterpriseId 路径变量。
         for (PathPattern pattern : ENTERPRISE_PATTERNS) {
             PathPattern.PathMatchInfo matchInfo = pattern.matchAndExtract(requestPath);
             if (matchInfo != null) {
+                // 路径变量提取后转为 Long；非数字值（如 "abc"）返回 null，
+                // 由调用方放行，后续由 Controller 的 @PathVariable 类型转换失败处理。
                 return parseEnterpriseId(matchInfo.getUriVariables().get("enterpriseId"));
             }
         }

@@ -118,7 +118,20 @@ public enum ErrorCode {
     DEPARTMENT_PARENT_CYCLE("DEPARTMENT_PARENT_CYCLE", "上级部门不能是当前部门或其子部门", HttpStatus.BAD_REQUEST),
 
     /** 删除部门时仍存在子部门，固定 409。 */
-    DEPARTMENT_HAS_CHILDREN("DEPARTMENT_HAS_CHILDREN", "请先移动或删除子部门", HttpStatus.CONFLICT);
+    DEPARTMENT_HAS_CHILDREN("DEPARTMENT_HAS_CHILDREN", "请先移动或删除子部门", HttpStatus.CONFLICT),
+
+    /** 知识库不存在、不属于当前企业，或已禁用（禁用与不存在同样处理，不泄露状态），固定 404。 */
+    KNOWLEDGE_BASE_NOT_FOUND("KNOWLEDGE_BASE_NOT_FOUND", "知识库不存在", HttpStatus.NOT_FOUND),
+
+    /** 添加知识库成员时，该用户在该知识库已存在成员记录（唯一键兜底冲突语义），固定 409。 */
+    KNOWLEDGE_BASE_MEMBER_ALREADY_EXISTS("KNOWLEDGE_BASE_MEMBER_ALREADY_EXISTS", "该用户已是知识库成员", HttpStatus.CONFLICT),
+
+    /** 修改/移除知识库成员时，目标成员记录不存在，固定 404。 */
+    KNOWLEDGE_BASE_MEMBER_NOT_FOUND("KNOWLEDGE_BASE_MEMBER_NOT_FOUND", "知识库成员不存在", HttpStatus.NOT_FOUND),
+
+    /** 管理员试图修改或移除自己的知识库成员身份，固定 403（防止降级/退出后失去管理权）。 */
+    KNOWLEDGE_BASE_SELF_OPERATION_NOT_ALLOWED("KNOWLEDGE_BASE_SELF_OPERATION_NOT_ALLOWED",
+            "不能修改或移除自己的知识库成员身份", HttpStatus.FORBIDDEN);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;

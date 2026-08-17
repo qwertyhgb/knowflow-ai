@@ -13,7 +13,6 @@ import io.github.qwertyhgb.knowflow.enterprise.entity.Enterprise;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseDepartment;
 import io.github.qwertyhgb.knowflow.enterprise.entity.EnterpriseMember;
 import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseDepartmentStatus;
-import io.github.qwertyhgb.knowflow.enterprise.enums.EnterpriseMemberStatus;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseDepartmentMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMapper;
 import io.github.qwertyhgb.knowflow.enterprise.mapper.EnterpriseMemberMapper;

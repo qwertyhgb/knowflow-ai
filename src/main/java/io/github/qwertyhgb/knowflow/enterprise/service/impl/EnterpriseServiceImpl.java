@@ -259,7 +259,7 @@ public class EnterpriseServiceImpl implements EnterpriseService {
                 .toList();
         Map<Long, EnterpriseRole> roleMap = roleIds.isEmpty()
                 ? Map.of()
-                : enterpriseRoleMapper.selectBatchIds(roleIds).stream()
+                : enterpriseRoleMapper.selectByIds(roleIds).stream()
                         .collect(Collectors.toMap(EnterpriseRole::getId, Function.identity()));
 
         // 4. 组装 VO；若某 userId 在 sys_user 中已不存在，email/nickname 留空。

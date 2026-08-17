@@ -35,7 +35,8 @@ class FlywayMigrationTest {
             "4", "create enterprise invitation",
             "5", "create enterprise department",
             "6", "create enterprise rbac tables",
-            "7", "drop member role from enterprise member");
+            "7", "drop member role from enterprise member",
+            "8", "create knowledge base");
 
     @Autowired
     private DataSource dataSource;
@@ -120,6 +121,22 @@ class FlywayMigrationTest {
             assertTableExists(statement, "enterprise_role_permission");
             assertEquals(Set.of("id", "enterprise_role_id", "permission_id", "created_at"),
                     tableColumns(statement, "enterprise_role_permission"));
+        }
+    }
+
+    @Test
+    void shouldCreateKnowledgeBaseTablesWithExpectedColumns() throws Exception {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            assertTableExists(statement, "knowledge_base");
+            assertEquals(Set.of("id", "enterprise_id", "name", "description", "access_mode",
+                            "owner_user_id", "status", "created_at", "updated_at"),
+                    tableColumns(statement, "knowledge_base"));
+
+            assertTableExists(statement, "knowledge_base_member");
+            assertEquals(Set.of("id", "knowledge_base_id", "enterprise_id", "user_id",
+                            "member_role", "created_at", "updated_at"),
+                    tableColumns(statement, "knowledge_base_member"));
         }
     }
 
