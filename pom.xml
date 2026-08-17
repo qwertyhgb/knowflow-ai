@@ -52,6 +52,17 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
+        <!-- Spring Data Elasticsearch：Spring 生态操作 Elasticsearch 的标准入口，提供
+             ElasticsearchOperations 模板与 Repository 抽象，以及基于 @Document/@Field
+             注解的自动配置（自动创建 Client 与索引操作 Bean）。版本由 Spring Boot BOM 管理，
+             不写版本号。
+             引入理由：文档全文搜索——MySQL 的 LIKE '%xxx%' 走全表扫描、无倒排索引，
+             无法支撑关键词检索；解析完成的文档纯文本（document.content）需要进入 ES
+             供后续搜索接口检索（Phase 8 第一步：本步只建索引模型与初始化，不建搜索接口）。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-elasticsearch</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>

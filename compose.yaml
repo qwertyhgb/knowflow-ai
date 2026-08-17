@@ -7,6 +7,15 @@
 #   - 当前业务只是「上传文档 → 异步解析」这类低频可靠消息，RabbitMQ 足够，
 #     后续出现真正的流式场景再评估 Kafka。
 #
+# 关于 Elasticsearch（Phase 8 引入，负责文档全文搜索）：
+#   - 为什么 ES 用独立容器而不是 MySQL：两者是不同生态、拥有独立生命周期的产品。
+#     ES 是 JVM 应用（自己的堆内存、磁盘布局、集群模型），MySQL 是关系型存储；
+#     两者独立升级、独立扩缩容、独立挂载数据卷才互不干扰——塞进同一个容器只会
+#     内存竞争、生命周期耦合，组合编排（compose 按服务隔离）才是各自正确的管理方式。
+#   - ES vs MySQL 定位差异（一句话版）：MySQL 是事实源（数据的权威版本），
+#     ES 是检索副本（为搜索优化的倒排索引）——同一份文档会以
+#     「MySQL 落库 + ES 建索引」双写的方式存在，双写/一致性问题后续步骤专门讲。
+#
 # 关于 healthcheck（健康检查）：
 #   - compose 的 healthcheck 让 Docker 周期性探测服务是否真正就绪，而不仅是进程已启动；
 #   - 这里用 rabbitmq-diagnostics ping 探测 RabbitMQ 应用层是否可响应，
@@ -69,6 +78,49 @@ services:
       retries: 10
       start_period: 30s
 
+  # Elasticsearch：文档全文搜索服务。
+  # 版本选型依据（与 Spring Data Elasticsearch 的兼容矩阵，教学重点）：
+  #   1. pom 添加 spring-boot-starter-data-elasticsearch 后（版本由 Spring Boot 4.1 BOM 管理，
+  #      不手写版本号），运行 mvn dependency:tree 实际解析出 spring-data-elasticsearch 6.1.0；
+  #   2. 对照官方兼容矩阵（https://docs.spring.io/spring-data/elasticsearch/reference/elasticsearch/versions.html，
+  #      2026.0 行），Spring Data Elasticsearch 6.1.x 对应 Elasticsearch 9.4.2；
+  #   3. 注意：这里不是 8.x。8.x 系列对应 Spring Data Elasticsearch 5.5.x（2025.0 行，
+  #      已标记 out of maintenance）。客户端（SDE 6.1.0）与服务端（ES 8.x）跨大版本
+  #      组合不受官方支持，故跟随 BOM 解析出的 6.1.0 选择服务端 9.4.2。
+  elasticsearch:
+    # 使用自定义 Dockerfile 构建的镜像，预装 IK 中文分词插件。
+    # 见 Dockerfile.elasticsearch 注释：为什么要用自定义镜像而非手动安装插件。
+    build:
+      context: .
+      dockerfile: Dockerfile.elasticsearch
+    image: knowflow-elasticsearch-ik:9.4.2
+    container_name: knowflow-elasticsearch
+    environment:
+      # 单节点开发模式：本地学习只需一个节点即可完整使用
+      # （单节点自带所有主/数据分片职责，无需发现其他节点）。
+      # 生产集群需要多节点 + 真实安全配置，此处配置一律不代表生产形态。
+      discovery.type: single-node
+      # 本地学习关闭安全认证（免费版默认开启 TLS + 账号密码，徒增学习噪音）。
+      # 生产必须开启：xpack.security.enabled=true 并配置密码/证书。
+      xpack.security.enabled: false
+      # ES 是 JVM 应用：默认堆内存会按宿主机内存的一半分配，
+      # 开发机（8G/16G 内存）直接启动会被换页拖垮甚至 OOM，必须显式限制。
+      # 512m 仅供本地学习；真实部署需按数据量/分片数另行测算。
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      # 9200 是 REST API 端口（应用与 curl 都通过它访问）；
+      # 9300 是节点间传输端口，单节点不需要暴露到宿主机。
+      - "${KNOWFLOW_ES_PORT:-9200}:9200"
+    volumes:
+      - knowflow-es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
 volumes:
   knowflow-mysql-data:
   knowflow-rabbitmq-data:
+  knowflow-es-data:

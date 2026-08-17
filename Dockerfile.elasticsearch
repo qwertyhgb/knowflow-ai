@@ -1,0 +1,24 @@
+# 自定义 Elasticsearch 镜像：预装 IK 中文分词插件（analysis-ik）。
+#
+# 为什么用自定义镜像而不是容器启动后手动装插件：
+#   - 插件是镜像的一部分才可重复构建。数据卷只持久化数据（ES 的 data 目录），
+#     plugins 目录在容器重建后会丢失——如果手动装到容器里，docker compose down
+#     后重建容器，插件就没了，每次都要重新手动装一遍。
+#   - 把插件装进镜像（Dockerfile 的 RUN 阶段），每次构建/bulid 都保证插件存在，
+#     开发/测试/CI 环境拿到同一个镜像就能直接用，不需要额外操作。
+#
+# 选型依据（IK 9.4.2 版本存在性验证）：
+#   - 访问 https://release.infinilabs.com/analysis-ik/stable/ 确认存在
+#     elasticsearch-analysis-ik-9.4.2.zip，与 compose 中 ES 9.4.2 精确匹配。
+#   - 下载 URL 使用 infinilabs 官方 release 分发地址，而非 medcl 原 GitHub release
+#     （原仓库已迁移至 infinilabs/analysis-ik，release 在 infinilabs 域名下分发）。
+#   - 版本不匹配会导致插件无法加载或运行时异常，因此必须严格一一对应。
+
+FROM elasticsearch:9.4.2
+
+# 安装 IK 中文分词插件：使用 elasticsearch-plugin 的本地文件安装方式。
+# 先从官方 release 分发站点下载对应版本的 zip，再用 install file:// 安装。
+# 安装后删除 zip 以减小镜像体积（多阶段构建在单一 Dockerfile 中，直接 rm 即可）。
+RUN bin/elasticsearch-plugin install \
+    https://release.infinilabs.com/analysis-ik/stable/elasticsearch-analysis-ik-9.4.2.zip \
+    -b

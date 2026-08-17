@@ -55,6 +55,13 @@ spring:
         # 设为 false：被拒绝即离开原队列，broker 按 parse-queue 的死信配置
         # （x-dead-letter-exchange，见 MqConfig）把消息转发到 DLX → DLQ 等待人工排查。
         default-requeue-rejected: false
+  elasticsearch:
+    # ES 客户端连接地址：本地默认值（compose 中 knowflow-elasticsearch），
+    # 生产由环境变量覆盖（与 knowflow.* 配置风格一致）。
+    # 本步未启用安全认证（compose 中 xpack.security.enabled=false），
+    # 故不需要 username/password；生产开启 xpack.security 后需补充
+    # spring.elasticsearch.username/password 或 API Key。
+    uris: ${KNOWFLOW_ES_URIS:http://localhost:9200}
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"

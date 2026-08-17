@@ -153,7 +153,10 @@ public enum ErrorCode {
 
     /** 文档当前状态不允许解析（只有 UPLOADED 可解析；已 READY/FAILED/PARSING 均拒绝），
      *  固定 409。PARSING 是瞬时态，正常流程不会读到；此错误码主要防止重复解析。 */
-    DOCUMENT_STATUS_NOT_ALLOWED("DOCUMENT_STATUS_NOT_ALLOWED", "当前状态不允许解析", HttpStatus.CONFLICT);
+    DOCUMENT_STATUS_NOT_ALLOWED("DOCUMENT_STATUS_NOT_ALLOWED", "当前状态不允许解析", HttpStatus.CONFLICT),
+
+    /** 搜索关键词为空（前端应做非空校验，这里作为防御性后端校验），固定 400。 */
+    SEARCH_KEYWORD_REQUIRED("SEARCH_KEYWORD_REQUIRED", "搜索关键词不能为空", HttpStatus.BAD_REQUEST);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;

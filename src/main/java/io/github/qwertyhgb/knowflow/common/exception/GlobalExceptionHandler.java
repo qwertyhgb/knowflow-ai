@@ -8,6 +8,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
@@ -116,6 +117,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Void>> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
         log.warn("event=request_media_type_not_supported contentType={}", ex.getContentType());
         return failure(ErrorCode.UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /**
+     * 请求参数缺失（如未传必需参数）：Spring MVC 在参数解析阶段触发此异常，早于
+     * Controller 方法体。固定 400 + INVALID_PARAMETER，记 WARN 不记堆栈。
+     */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Result<Void>> handleMissingServletRequestParameter(
+            MissingServletRequestParameterException ex) {
+        log.warn("event=request_param_missing name={} paramType={}", ex.getParameterName(), ex.getParameterType());
+        return failure(ErrorCode.INVALID_PARAMETER, "请求参数 " + ex.getParameterName() + " 不能为空");
     }
 
     /**

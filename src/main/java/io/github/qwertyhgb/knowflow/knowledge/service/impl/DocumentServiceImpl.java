@@ -23,6 +23,7 @@ import io.github.qwertyhgb.knowflow.knowledge.service.DocumentService;
 import io.github.qwertyhgb.knowflow.knowledge.vo.DocumentVO;
 import io.github.qwertyhgb.knowflow.mq.message.DocumentParseMessage;
 import io.github.qwertyhgb.knowflow.mq.producer.DocumentParsePublisher;
+import io.github.qwertyhgb.knowflow.search.service.DocumentIndexService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -71,7 +72,9 @@ import java.util.ArrayList;
  *   <li>权限校验与上传一致；三条件定位文档；仅 UPLOADED 可解析（409 防重复解析）；</li>
  *   <li>提前落库标记 PARSING（解析可能耗时，先标记防并发重复解析）；</li>
  *   <li>按扩展名分发提取纯文本：TXT/MD 直接读字节、PDF 用 PDFBox、DOCX 用 POI；</li>
- *   <li>成功 → READY + content；失败 → FAILED + 白名单短语（正常终态，不抛异常）。</li>
+ *   <li>成功 → READY + content；失败 → FAILED + 白名单短语（正常终态，不抛异常）；</li>
+ *   <li>成功链路 = READY 落库（MySQL 事实源）→ 写 ES 索引副本（失败降级记 WARN，
+ *       不改变 READY 结果——主从副本模型，见 {@code parseDocumentInternal} 内注释）。</li>
  * </ol>
  *
  * <p>权限模型与知识库模块一致：两级编辑者取或——资源级（知识库成员且 memberRole ∈
@@ -101,6 +104,9 @@ public class DocumentServiceImpl implements DocumentService {
     /** 文档解析消息生产者：上传事务提交后发布解析消息，由 MQ 消费者异步解析。 */
     private final DocumentParsePublisher parsePublisher;
 
+    /** 文档索引写入服务：解析成功后把 READY 文档同步为 ES 检索副本（失败降级不影响主库）。 */
+    private final DocumentIndexService documentIndexService;
+
     /** 白名单扩展名集（小写），用于文件类型校验。 */
     private static final Set<String> ALLOWED_EXTENSIONS = Set.of("pdf", "docx", "txt", "md");
 
@@ -128,7 +134,8 @@ public class DocumentServiceImpl implements DocumentService {
                                EnterpriseRoleMapper enterpriseRoleMapper,
                                Clock clock,
                                @Value("${knowflow.storage.local-dir}") String localDir,
-                               DocumentParsePublisher parsePublisher) {
+                               DocumentParsePublisher parsePublisher,
+                               DocumentIndexService documentIndexService) {
         this.documentMapper = documentMapper;
         this.knowledgeBaseMapper = knowledgeBaseMapper;
         this.knowledgeBaseMemberMapper = knowledgeBaseMemberMapper;
@@ -138,6 +145,7 @@ public class DocumentServiceImpl implements DocumentService {
         this.clock = clock;
         this.localDir = localDir;
         this.parsePublisher = parsePublisher;
+        this.documentIndexService = documentIndexService;
     }
 
     @Override
@@ -354,7 +362,24 @@ public class DocumentServiceImpl implements DocumentService {
         document.setUpdatedAt(clock.instant());
         documentMapper.updateById(document);
 
-        // 只记录计数与标识，不记录文件名与内容本体。
+        // 8. 写 ES 索引副本（先主后副本的顺序约定）。
+        //    ---- 为什么顺序是「先 MySQL 后 ES」？----
+        //    MySQL document 表是事实源（权威数据），ES 索引是检索副本——必须先保证
+        //    主库 READY 落库成功，再尝试同步副本；主库成功、副本失败时，文档仍是
+        //    完整的（内容已在 MySQL），可以靠重建索引（reindex，后续步骤）补齐。
+        //    ---- 为什么失败只降级不抛出？----
+        //    副本写入失败不应影响主库业务：文档保持 READY，记 WARN 等待补偿。
+        //    这与 Phase 7「消息发布失败不阻塞上传」是同一思维：异步链路失败 →
+        //    主链路不受影响 → 补偿机制兜底（最终一致性）。
+        //    失败原因只记异常类型名（白名单原则），不记录异常 message/堆栈。
+        try {
+            documentIndexService.indexDocument(document);
+        } catch (RuntimeException ex) {
+            log.warn("event=document_index_write_failed documentId={} errorType={}",
+                    documentId, ex.getClass().getSimpleName());
+        }
+
+        // 9. 只记录计数与标识，不记录文件名与内容本体。
         log.info("event=document_parsed enterpriseId={} knowledgeBaseId={} documentId={} contentLength={}",
                 enterpriseId, knowledgeBaseId, documentId, content.length());
         return document;

@@ -26,6 +26,7 @@ import io.github.qwertyhgb.knowflow.knowledge.vo.DocumentVO;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMemberMapper;
 import io.github.qwertyhgb.knowflow.mq.message.DocumentParseMessage;
 import io.github.qwertyhgb.knowflow.mq.producer.DocumentParsePublisher;
+import io.github.qwertyhgb.knowflow.search.service.DocumentIndexService;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -107,6 +108,9 @@ class DocumentServiceImplTest {
     @Mock
     private DocumentParsePublisher parsePublisher;
 
+    @Mock
+    private DocumentIndexService documentIndexService;
+
     private DocumentServiceImpl documentService;
 
     @BeforeAll
@@ -130,7 +134,8 @@ class DocumentServiceImplTest {
         documentService = new DocumentServiceImpl(
                 documentMapper, knowledgeBaseMapper, knowledgeBaseMemberMapper,
                 membershipChecker, enterpriseMemberMapper, enterpriseRoleMapper,
-                Clock.fixed(NOW, ZoneOffset.UTC), tempDir.toString(), parsePublisher);
+                Clock.fixed(NOW, ZoneOffset.UTC), tempDir.toString(), parsePublisher,
+                documentIndexService);
     }
 
     @AfterEach
@@ -651,7 +656,7 @@ class DocumentServiceImplTest {
         return new DocumentServiceImpl(
                 documentMapper, knowledgeBaseMapper, knowledgeBaseMemberMapper,
                 membershipChecker, enterpriseMemberMapper, enterpriseRoleMapper,
-                advancedClock, tempDir.toString(), parsePublisher);
+                advancedClock, tempDir.toString(), parsePublisher, documentIndexService);
     }
 
     @Test
@@ -907,6 +912,14 @@ class DocumentServiceImplTest {
         assertEquals(expectedContent, result.getContent(), "内部解析结果应与原文一致");
         assertNull(result.getFailedReason());
         verify(documentMapper, times(2)).updateById(any(Document.class));
+
+        // 解析成功后必须尝试同步 ES 副本：传入的必须是「已 READY」的文档实体
+        // （先主后副本：MySQL 落 READY 之后才写 ES，副本只同步 READY 文档）。
+        ArgumentCaptor<Document> indexCaptor = ArgumentCaptor.forClass(Document.class);
+        verify(documentIndexService).indexDocument(indexCaptor.capture());
+        assertEquals(DocumentStatus.READY, indexCaptor.getValue().getStatus(),
+                "写入 ES 的文档必须是 READY 状态（只同步检索可用的文档）");
+        assertEquals(300L, indexCaptor.getValue().getId());
     }
 
     @Test
@@ -921,6 +934,36 @@ class DocumentServiceImplTest {
 
         assertEquals(ErrorCode.DOCUMENT_STATUS_NOT_ALLOWED, exception.getErrorCode());
         verify(documentMapper, never()).updateById(any(Document.class));
+    }
+
+    @Test
+    void shouldKeepReadyWhenIndexWriteFails() throws Exception {
+        // 主从副本模型的降级场景：解析成功、主库已落 READY，但写 ES 副本失败
+        // （如 ES 宕机、网络抖动）。解析结果不受影响——文档保持 READY（内容已在 MySQL），
+        // 异常被吞掉只记 WARN，随后可用重建索引（reindex，后续步骤）补偿。
+        Path targetDir = tempDir.resolve("10").resolve("100");
+        Files.createDirectories(targetDir);
+        String expectedContent = "index write failure content";
+        Files.writeString(targetDir.resolve("index-fail.txt"), expectedContent, StandardCharsets.UTF_8);
+
+        Document doc = document(400L, "index-fail.txt", "text/plain", (long) expectedContent.length());
+        doc.setStorageKey("index-fail.txt");
+        when(documentMapper.selectOne(any())).thenReturn(doc);
+        // 模拟 ES 写入抛异常。
+        doThrow(new RuntimeException("es unavailable"))
+                .when(documentIndexService).indexDocument(any(Document.class));
+
+        // 写索引失败不向外传播：parseDocumentInternal 正常返回（assertDoesNotThrow）。
+        Document result = assertDoesNotThrow(() ->
+                parseServiceWithAdvancedClock().parseDocumentInternal(10L, 100L, 400L));
+
+        // 主库结果不被副本失败影响：READY + content 完整。
+        assertEquals(DocumentStatus.READY, result.getStatus());
+        assertEquals(expectedContent, result.getContent(), "副本失败不应影响主库解析结果");
+        // 状态机落库流程照常（PARSING + READY 两次 updateById）。
+        verify(documentMapper, times(2)).updateById(any(Document.class));
+        // 索引写入确实被尝试调用过一次（失败被捕获，不重复重试）。
+        verify(documentIndexService).indexDocument(any(Document.class));
     }
 
     /** 用 PDFBox 3.x API 生成一页含指定文本的 PDF（Standard14 字体 + PDPageContentStream）。 */
