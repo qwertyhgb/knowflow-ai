@@ -8,6 +8,7 @@ import {
   Collection,
   Document,
   Search,
+  ChatDotRound,
   ArrowDown,
   SwitchButton,
   Bell,
@@ -58,6 +59,8 @@ const menus: MenuItem[] = [
   { index: 'knowledge', title: '知识库', icon: Collection, path: '/knowledge-bases', real: true },
   { index: 'document', title: '文档', icon: Document, real: false },
   { index: 'search', title: '搜索', icon: Search, path: '/search', real: true },
+  // AI 助手：真实路由项，点击跳转 /ai-chat。放在搜索之后作为功能入口。
+  { index: 'ai-chat', title: 'AI 助手', icon: ChatDotRound, path: '/ai-chat', real: true },
 ]
 
 /** el-menu 选中回调：真实项跳转对应路由，占位项提示"功能开发中" */

@@ -8,6 +8,7 @@ import InvitationsView from '../views/InvitationsView.vue'
 import KnowledgeBaseView from '../views/KnowledgeBaseView.vue'
 import KnowledgeBaseDetailView from '../views/KnowledgeBaseDetailView.vue'
 import SearchView from '../views/SearchView.vue'
+import AiChatView from '../views/AiChatView.vue'
 import { useUserStore } from '../stores/user'
 
 /**
@@ -73,6 +74,14 @@ const router = createRouter({
           path: 'search',
           name: 'search',
           component: SearchView,
+        },
+        {
+          // AI 助手：对话页。注意它与其他业务页不同——不依赖企业上下文
+          // （后端 AI 接口是非企业作用域，请求无需携带 X-Enterprise-Id），
+          // 因此未选定企业也能正常使用；未登录则由上方全局路由守卫拦截。
+          path: 'ai-chat',
+          name: 'aiChat',
+          component: AiChatView,
         },
       ],
     },
