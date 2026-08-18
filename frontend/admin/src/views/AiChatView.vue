@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { Service } from '@element-plus/icons-vue'
-import { chatStream } from '../api/aiChat'
+import { ragChatStream, type RagCitation } from '../api/aiChat'
 
 /**
- * AI 助手对话页。
+ * AI 助手对话页（RAG 知识库问答）。
  *
- * 一个「无状态」的单轮对话界面：用户提问，后端逐字流式返回回答，前端以
- * 打字机效果展示。界面参考主流 AI 对话产品（气泡 + 输入区 + 流式光标）。
+ * 用户提问后，后端先在知识库向量索引中检索相关资料（引用来源），
+ * 再基于资料流式生成回答。前端以打字机效果展示回答，并在回答下方
+ * 渲染「引用来源」卡片（文件名 + 相关度 + 块序号，可点击跳转知识库）。
  *
  * 【为什么消息只存在组件内存里，刷新即清空？】
  * 后端当前的流式接口是「无状态」调用：每次请求独立，后端不保存任何会话记忆，
@@ -16,12 +18,18 @@ import { chatStream } from '../api/aiChat'
  * 刷新清空是符合当前后端能力的预期行为。
  */
 
+/** RAG 检索参数：Phase 11 后端教学实验验证过的合理默认值。 */
+const TOP_K = 5
+const SCORE_THRESHOLD = 0.3
+
 /** 单条聊天消息 */
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   /** 是否为错误提示（灰色显示） */
   error?: boolean
+  /** 引用来源（只属于 assistant 消息；user 消息没有）。 */
+  citations?: RagCitation[]
 }
 
 /** 消息列表：只存本次会话的气泡，不持久化（见上方注释） */
@@ -38,6 +46,9 @@ let activeController: AbortController | null = null
 
 /** 消息列表容器 DOM，用于自动滚动到底部 */
 const listRef = ref<HTMLDivElement>()
+
+/** 路由实例：引用卡片点击跳转知识库详情页用 */
+const router = useRouter()
 
 /** 复位接收态：onDone / onError / stop 都会走到这里，保证状态不残留 */
 function reset() {
@@ -58,10 +69,11 @@ function scrollToBottom() {
 }
 
 /**
- * 发送消息。
+ * 发送消息（RAG 知识库问答）。
  *
- * 流程：push 用户消息 → push 空的 assistant 占位消息 → 调 chatStream，
- * 在 onChunk 里把分片追加到占位消息、onError 里替换为错误提示、onDone 复位状态。
+ * 流程：push 用户消息 → push 空的 assistant 占位消息 → 调 ragChatStream，
+ * 在 onCitations 里给占位消息挂引用来源、onChunk 里追加分片、
+ * onError 里替换为错误提示、onDone 复位状态。
  */
 function send() {
   const text = input.value.trim()
@@ -74,7 +86,7 @@ function send() {
   messages.value.push({ role: 'user', content: text })
   // 2. 清空输入框
   input.value = ''
-  // 3. 追加一条空的 assistant 占位消息，用于承载流式分片
+  // 3. 追加一条空的 assistant 占位消息，用于承载流式分片与引用来源
   messages.value.push({ role: 'assistant', content: '' })
   // 记录占位消息的索引：流式期间它就是数组最后一条，回调里用索引更新它
   // （而不是在回调里 push 新消息——那样会每到一个分片就多一条气泡，完全错误）
@@ -83,7 +95,15 @@ function send() {
   streaming.value = true
   scrollToBottom()
 
-  activeController = chatStream(text, {
+  // 调用 RAG 流式接口（不再走普通 chatStream）：后端先发 citations 引用来源事件，
+  // 再逐块推回答分片。
+  activeController = ragChatStream(text, TOP_K, SCORE_THRESHOLD, {
+    // 引用先于回答到达：拿到引用数组立即挂到占位消息上，引用卡片立刻渲染，
+    // 等回答流式显示时 [1] 已可对应到卡片。
+    onCitations: (citations) => {
+      messages.value[assistantIndex].citations = citations
+      scrollToBottom()
+    },
     // 每到一个分片，追加到对应 assistant 消息的 content（用索引定位，见上方注释）
     onChunk: (chunk) => {
       messages.value[assistantIndex].content += chunk
@@ -100,6 +120,24 @@ function send() {
       reset()
     },
   })
+}
+
+/**
+ * 点击引用卡片：跳转到该知识库的详情页。
+ *
+ * 【为什么跳知识库详情页而不是文档级定位？】
+ * 引用块属于某个知识库（citation.knowledgeBaseId），知识库详情页能查看该库的文档列表
+ * 并进入文档详情——前端已有这个路由。要做到「跳转后精确定位到块所在文档」需要后端
+ * 返回更多信息（如文档 ID 与定位锚点），留作后续优化，本步先保证「点得到、跳得对」。
+ */
+function openKnowledgeBase(citation: RagCitation) {
+  router.push(`/knowledge-bases/${citation.knowledgeBaseId}`)
+}
+
+/** 把相似度分数格式化为「相关度 82%」（score 为 null 时显示占位符）。 */
+function formatScore(score: number | null): string {
+  if (score === null) return '-'
+  return `相关度 ${Math.round(score * 100)}%`
 }
 
 /** 停止生成：中断当前流式请求 */
@@ -152,19 +190,45 @@ function handleKeydown(e: KeyboardEvent) {
           class="message-row"
           :class="msg.role"
         >
-          <div
-            class="bubble"
-            :class="[msg.role, { error: msg.error }]"
-          >
-            {{ msg.content }}
+          <div class="assistant-block">
+            <div
+              class="bubble"
+              :class="[msg.role, { error: msg.error }]"
+            >
+              {{ msg.content }}
+              <!--
+                流式接收中的尾部闪烁光标：模拟打字机效果。
+                只有当「正在接收」且「本条就是正在接收的那条 assistant 消息」时才显示。
+              -->
+              <span
+                v-if="streaming && msg.role === 'assistant' && index === messages.length - 1"
+                class="cursor"
+              ></span>
+            </div>
+
             <!--
-              流式接收中的尾部闪烁光标：模拟打字机效果。
-              只有当「正在接收」且「本条就是正在接收的那条 assistant 消息」时才显示。
+              引用来源区：只属于 assistant 消息（v-if 判断 citations 存在且非空）。
+              空上下文场景后端不发 citations，直接返回「没有找到相关内容」提示文本，
+              前端无需特殊分支——没有引用卡片，按普通 assistant 消息展示即可。
             -->
-            <span
-              v-if="streaming && msg.role === 'assistant' && index === messages.length - 1"
-              class="cursor"
-            ></span>
+            <div
+              v-if="msg.role === 'assistant' && msg.citations && msg.citations.length > 0"
+              class="citations"
+            >
+              <div class="citations-title">引用来源</div>
+              <div
+                v-for="(citation, cIndex) in msg.citations"
+                :key="cIndex"
+                class="citation-card"
+                @click="openKnowledgeBase(citation)"
+              >
+                <div class="citation-main">
+                  <span class="citation-file">{{ citation.fileName }}</span>
+                  <span class="citation-chunk">第 {{ citation.chunkIndex + 1 }} 块</span>
+                </div>
+                <div class="citation-score">{{ formatScore(citation.score) }}</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -275,6 +339,14 @@ function handleKeydown(e: KeyboardEvent) {
   justify-content: flex-start;
 }
 
+/* assistant 消息块：气泡 + 引用来源卡片垂直堆叠 */
+.assistant-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 78%;
+}
+
 /* 气泡通用样式 */
 .bubble {
   max-width: 78%;
@@ -308,6 +380,71 @@ function handleKeydown(e: KeyboardEvent) {
   background: #f5f7fa;
   border-color: #e4e7ed;
   box-shadow: none;
+}
+
+/* ---------------- 引用来源区 ---------------- */
+.citations {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.citations-title {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 6px;
+  padding-left: 2px;
+}
+
+/* 引用卡片：浅灰底圆角小卡，与白色气泡形成层次（气泡是内容、卡片是佐证） */
+.citation-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #f5f7fa;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  /* hover 过渡：轻微抬升 + 边框变蓝，暗示可点击 */
+  transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+
+.citation-card:hover {
+  background: #ecf5ff;
+  border-color: #a0cfff;
+  transform: translateY(-1px);
+}
+
+.citation-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0; /* 允许子元素收缩，防止长文件名撑破卡片 */
+}
+
+.citation-file {
+  font-size: 13px;
+  font-weight: 600;
+  color: #409eff; /* 文件名蓝色，突出来源 */
+  /* 长文件名省略号：卡片宽度有限，超长截断而不是换行撑高 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.citation-chunk {
+  font-size: 12px;
+  color: #909399;
+  flex-shrink: 0;
+}
+
+.citation-score {
+  font-size: 12px;
+  color: #67c23a; /* 相关度用绿色，语义「可信」 */
+  flex-shrink: 0;
+  font-weight: 500;
 }
 
 /* 尾部闪烁光标：模拟打字机的竖线 */
