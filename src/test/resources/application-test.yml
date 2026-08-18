@@ -4,6 +4,15 @@ spring:
     username: sa
     password: ""
     driver-class-name: org.h2.Driver
+  # 【为什么 test 环境要排除 ES 向量存储自动配置？】
+  # Spring AI 的 ES 向量存储（ElasticsearchVectorStore）在启动时（afterPropertiesSet）
+  # 会检查/创建索引——test 环境没有真实 ES，若不排除，所有 @SpringBootTest
+  # （含原有 AiChatControllerTest 等）启动应用上下文时都会因「Index not found」失败。
+  # 这与 SearchIndexInitializer 用 @Profile("!test") 隔离真实 ES 的思路一致：
+  # 单测/Web 层测试用 mock 隔离真实基础设施，向量存储的真实读写留给手动验证。
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.vectorstore.elasticsearch.autoconfigure.ElasticsearchVectorStoreAutoConfiguration
 
 springdoc:
   api-docs:
