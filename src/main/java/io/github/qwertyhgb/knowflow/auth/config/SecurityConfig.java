@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.auth.config;
 
+import jakarta.servlet.DispatcherType;
 import io.github.qwertyhgb.knowflow.auth.filter.EnterpriseContextFilter;
 import io.github.qwertyhgb.knowflow.auth.filter.TokenAuthenticationFilter;
 import io.github.qwertyhgb.knowflow.auth.handler.RestAccessDeniedHandler;
@@ -107,6 +108,12 @@ public class SecurityConfig {
                         .requestMatchers("/api/users/register", "/api/users/login").permitAll()
                         // Swagger 文档相关路径也放行，方便本地调试时查看 API。
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        // ASYNC dispatch（异步分派）放行：SSE 流式接口（如 /api/ai/chat/stream）
+                        // 在 REQUEST 阶段已经完成认证与授权，ASYNC 阶段只是同一个请求的延续
+                        // （把流式响应体分片写出），不应重复授权。若不放行，TokenAuthenticationFilter
+                        // （继承 OncePerRequestFilter，默认跳过 ASYNC dispatch）不会重新建立认证，
+                        // SecurityContext 无法恢复，AuthorizationFilter 会把流式响应误判为匿名请求返回 403。
+                        .dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
                         // 其余所有请求都必须「已认证」（携带有效 Token），否则被拒绝。
                         .anyRequest().authenticated())
                 // 异常处理：把认证/授权失败转成统一的 JSON 响应，区分两种失败场景。

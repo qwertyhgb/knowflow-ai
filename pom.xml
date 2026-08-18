@@ -15,7 +15,28 @@
     <description>用于学习 Java 后端开发的知识库项目</description>
     <properties>
         <java.version>21</java.version>
+        <!-- Spring AI 版本：统一管理 Spring AI 全家桶依赖版本。
+             2.0.0 是官方 GA 稳定版（2026-06 发布），官方支持 Spring Boot 4.0.x / 4.1.x，
+             与本项目的 Spring Boot 4.1.0 是官方匹配的版本组合，不用旧版 1.x。 -->
+        <spring-ai.version>2.0.0</spring-ai.version>
     </properties>
+    <dependencyManagement>
+        <dependencies>
+            <!--
+                Spring AI BOM（Bill of Materials）：以 import + pom 方式引入，统一管理
+                Spring AI 全家桶各依赖的版本。与 Spring Boot BOM 同模式：
+                让 Spring AI 各 starter 都共享同一个版本，避免手写每个 starter 的版本号、
+                防止多依赖版本漂移导致的冲突。之后新加 spring-ai-* 依赖都不用写版本号。
+            -->
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -67,6 +88,18 @@
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
+        </dependency>
+
+        <!-- Spring AI：官方 AI 集成框架，提供统一抽象的 ChatClient / ChatModel 等 Bean。
+             这里用 OpenAI 模型的 starter（版本由上面的 spring-ai-bom 统一管理，不写版本号）。
+             【为什么 OpenAI starter 能接 DeepSeek？】
+             DeepSeek 对外提供 OpenAI 兼容的 /chat/completions API，格式与 OpenAI 完全一致，
+             Spring AI 只需把 base-url 指向 DeepSeek 端点即可复用 OpenAI 适配器，无需专用 starter。
+             这也是国内大模型生态的常见做法——几乎所有国产模型都提供 OpenAI 兼容层，
+             移植成本极低，只用改 base-url 和模型名就能切换厂商。 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
 
         <!-- 数据库版本管理：Flyway 负责在应用启动时按序执行 db/migration 下的迁移脚本。

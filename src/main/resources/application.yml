@@ -62,6 +62,26 @@ spring:
     # 故不需要 username/password；生产开启 xpack.security 后需补充
     # spring.elasticsearch.username/password 或 API Key。
     uris: ${KNOWFLOW_ES_URIS:http://localhost:9200}
+  ai:
+    openai:
+      # DeepSeek 的 OpenAI 兼容端点。官方文档推荐写法，不需要 /v1 后缀——
+      # Spring AI 的 OpenAI 适配器会自动拼接路径。base-url 指向 DeepSeek
+      # 而非 OpenAI 官方，就能用这套配置调用 DeepSeek 的大模型。
+      base-url: https://api.deepseek.com
+      # API Key 只从环境变量读取，默认空串。
+      # 【为什么 key 走环境变量而不写入配置文件/代码？】
+      # 这是安全底线：配置文件可能进版本库被泄露，代码也能被反编译。
+      # key 属于机密凭据，只允许通过运行环境注入（生产用密钥管理服务），
+      # 本地开发用 $env:DEEPSEEK_API_KEY 临时设置，绝不硬编码。
+      api-key: ${DEEPSEEK_API_KEY:}
+      chat:
+        options:
+          # deepseek-chat 是 DeepSeek 通用对话模型，性价比高，适合学习阶段；
+          # deepseek-reasoner 是推理模型，性能更强但更贵，以后用到再切换。
+          model: deepseek-chat
+          # 温度控制采样随机性：0 稳定、1 发散。
+          # 客服场景后续会调低以稳定语气，学习阶段 0.7 能直观感受到回答的自然度。
+          temperature: 0.7
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"

@@ -156,7 +156,18 @@ public enum ErrorCode {
     DOCUMENT_STATUS_NOT_ALLOWED("DOCUMENT_STATUS_NOT_ALLOWED", "当前状态不允许解析", HttpStatus.CONFLICT),
 
     /** 搜索关键词为空（前端应做非空校验，这里作为防御性后端校验），固定 400。 */
-    SEARCH_KEYWORD_REQUIRED("SEARCH_KEYWORD_REQUIRED", "搜索关键词不能为空", HttpStatus.BAD_REQUEST);
+    SEARCH_KEYWORD_REQUIRED("SEARCH_KEYWORD_REQUIRED", "搜索关键词不能为空", HttpStatus.BAD_REQUEST),
+
+    /**
+     * AI 服务暂时不可用（大模型调用失败：网络异常、限流、超时等），固定 503。
+     *
+     * 【为什么用 503 而不是 500？】
+     * 大模型是外部依赖，调用失败表示"当前服务暂不可用"，而不是应用内部 bug。
+     * 503（Service Unavailable）是标准语义，区别于 500（内部错误）。
+     * 前端可据此判断：503 属于可重试的临时故障（稍后重试即可），
+     * 而 500 往往需要后端排查，重试无意义。
+     */
+    AI_SERVICE_UNAVAILABLE("AI_SERVICE_UNAVAILABLE", "AI 服务暂时不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;
