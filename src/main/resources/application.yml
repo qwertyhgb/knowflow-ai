@@ -64,17 +64,34 @@ spring:
     uris: ${KNOWFLOW_ES_URIS:http://localhost:9200}
   ai:
     openai:
-      # DeepSeek 的 OpenAI 兼容端点。官方文档推荐写法，不需要 /v1 后缀——
-      # Spring AI 的 OpenAI 适配器会自动拼接路径。base-url 指向 DeepSeek
-      # 而非 OpenAI 官方，就能用这套配置调用 DeepSeek 的大模型。
+      # 【为什么拆分配置后仍保留顶层 base-url / api-key？】
+      # 本步之前只有聊天模型，base-url/api-key 直接配在顶层 spring.ai.openai.* 即可。
+      # 现在引入硅基流动（SiliconFlow）的 embedding 模型后，chat 与 embedding 指向
+      # 两个不同服务商、两个不同 host：DeepSeek 做对话（chat），硅基流动做向量化（embedding）。
+      # 因此 chat 与 embedding 各自用子段配置覆盖顶层的地址与密钥：
+      #   spring.ai.openai.chat.base-url      —— 聊天模型的地址
+      #   spring.ai.openai.embedding.base-url —— 嵌入模型的地址
+      # 【为什么不能删掉顶层配置？】
+      # Spring AI 的 OpenAI starter 还自动装配 chat/embedding 之外的模型
+      # （audio speech / image / moderation 等），它们读取顶层 spring.ai.openai.* 作为
+      # 公共默认。若把顶层 base-url/api-key 删掉，这些未拆分的模型会因缺少 api-key
+      # 在启动时抛「At least one credential source must be specified」直接导致应用起不来。
+      # 保留顶层作为公共默认（chat/embedding 子段覆盖），其余模型不配置 key 时不会真正
+      # 使用，本步也不涉及它们。验证方法见 DocumentVectorizeControllerTest 的上下文加载。
       base-url: https://api.deepseek.com
-      # API Key 只从环境变量读取，默认空串。
+      # 公共默认 API Key：只从环境变量读取，默认空串（保持顶层非 null，SDK 才能创建客户端）。
       # 【为什么 key 走环境变量而不写入配置文件/代码？】
       # 这是安全底线：配置文件可能进版本库被泄露，代码也能被反编译。
       # key 属于机密凭据，只允许通过运行环境注入（生产用密钥管理服务），
       # 本地开发用 $env:DEEPSEEK_API_KEY 临时设置，绝不硬编码。
       api-key: ${DEEPSEEK_API_KEY:}
       chat:
+        # DeepSeek 的 OpenAI 兼容端点。官方文档推荐写法，不需要 /v1 后缀——
+        # Spring AI 的 OpenAI 适配器会自动拼接路径。base-url 指向 DeepSeek
+        # 而非 OpenAI 官方，就能用这套配置调用 DeepSeek 的大模型。
+        base-url: https://api.deepseek.com
+        # API Key 只从环境变量读取，默认空串。
+        api-key: ${DEEPSEEK_API_KEY:}
         options:
           # deepseek-chat 是 DeepSeek 通用对话模型，性价比高，适合学习阶段；
           # deepseek-reasoner 是推理模型，性能更强但更贵，以后用到再切换。
@@ -82,6 +99,32 @@ spring:
           # 温度控制采样随机性：0 稳定、1 发散。
           # 客服场景后续会调低以稳定语气，学习阶段 0.7 能直观感受到回答的自然度。
           temperature: 0.7
+      embedding:
+        # 硅基流动（SiliconFlow）的 OpenAI 兼容 /embeddings 端点。
+        # 【为什么这里要带 /v1 后缀，而 DeepSeek 不带？】
+        # 两家服务商遵循的路径约定不同：DeepSeek 的 OpenAI 兼容层在根路径即可
+        # （Spring AI 会自行拼接 /v1），而硅基流动要求显式带上 /v1。
+        # 以各家实际接入文档为准，不能想当然地沿用同一写法。
+        base-url: https://api.siliconflow.cn/v1
+        # 硅基流动的 API Key，只从环境变量读取，与 DEEPSEEK_API_KEY 同模式：
+        # 密钥不进配置文件/版本库，本地开发用 $env:SILICONFLOW_API_KEY 临时设置。
+        api-key: ${SILICONFLOW_API_KEY:}
+        options:
+          # BAAI/bge-m3 是北京智源开源的向量模型，中文检索能力强（也是当前中文
+          # embedding 基准测试的代表模型之一），硅基流动提供托管服务，输出向量维度 1024。
+          # 向量维度由模型决定：同一向量索引里所有向量必须同维度，换模型即换维度，
+          # 已落库向量将无法与新模型向量做距离计算——所以选好模型后不要轻易更换。
+          model: BAAI/bge-m3
+    vectorstore:
+      elasticsearch:
+        # 向量索引名：Spring AI 的 ES 向量存储会按此索引名创建 dense_vector 字段映射，
+        # 无需手写 ES Mapping（若后续需要精细控制映射，再自定义 ElasticsearchVectorStore 配置）。
+        index-name: knowflow_document_vectors
+        # 是否自动创建索引：必须为 true。查证 Spring AI 2.0 源码：该属性默认 false，
+        # 而 ElasticsearchVectorStore 的 afterPropertiesSet() 逻辑是——索引不存在时
+        # 若 initializeSchema=false 直接抛「Index not found」，应用启动即失败；
+        # 只有为 true 才会自动创建索引。这正对应验收「应用启动时 ES 向量索引自动创建」。
+        initialize-schema: true
 logging:
   pattern:
     console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX, UTC} %-5level [%thread] %logger{36} - %msg%n"

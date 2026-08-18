@@ -155,6 +155,11 @@ public enum ErrorCode {
      *  固定 409。PARSING 是瞬时态，正常流程不会读到；此错误码主要防止重复解析。 */
     DOCUMENT_STATUS_NOT_ALLOWED("DOCUMENT_STATUS_NOT_ALLOWED", "当前状态不允许解析", HttpStatus.CONFLICT),
 
+    /** 文档尚未解析完成（非 READY 状态，或 READY 但 content 为空），无法向量化，固定 400。
+     * 向量化的前提是文档内容已解析为纯文本（document.content）；UPLOADED/PARSING/FAILED
+     * 均无可靠内容，强行向量化会产生垃圾向量，必须拒绝。 */
+    DOCUMENT_NOT_READY("DOCUMENT_NOT_READY", "文档尚未解析完成，无法向量化", HttpStatus.BAD_REQUEST),
+
     /** 搜索关键词为空（前端应做非空校验，这里作为防御性后端校验），固定 400。 */
     SEARCH_KEYWORD_REQUIRED("SEARCH_KEYWORD_REQUIRED", "搜索关键词不能为空", HttpStatus.BAD_REQUEST),
 

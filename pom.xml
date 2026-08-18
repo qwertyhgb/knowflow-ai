@@ -101,6 +101,20 @@
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
+        <!-- Spring AI 的 Elasticsearch 向量存储 starter（版本由 spring-ai-bom 统一管理，不写版本号）。
+             引入理由：Embedding 向量化后的落库与检索（Phase 10/11）。
+             【为什么用 Spring AI 的 ES 向量存储抽象，而不是新引入专用向量数据库？】
+             1. 项目已有 ES 9.4.2（Phase 8 全文搜索引入），它原生支持 dense_vector + kNN 检索，
+                复用现有基础设施即可支撑向量语义检索，符合「已有技术能满足就不引入新技术」的教学原则；
+             2. 该 starter 开箱即用：自动装配 VectorStore Bean + ElasticsearchVectorStore，
+                且会自动创建带 dense_vector 字段的索引（用 spring.ai.vectorstore.elasticsearch.index-name
+                配置索引名），无需手写 ES Mapping；
+             3. VectorStore 是 Spring AI 的统一抽象接口（add/delete/similaritySearch），
+                后续若要换向量库（如 Milvus/Qdrant），业务代码无需改动，只换 starter 与配置。 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-vector-store-elasticsearch</artifactId>
+        </dependency>
 
         <!-- 数据库版本管理：Flyway 负责在应用启动时按序执行 db/migration 下的迁移脚本。
              Spring Boot 4 起 Flyway 自动配置移入独立的 starter，需显式引入。 -->
