@@ -1,0 +1,28 @@
+/**
+ * 全局基础样式。
+ *
+ * 这里只放「全局重置 + 基础排版」，组件内部的样式统一写在各自 <style scoped> 中。
+ * 好处：全局样式保持精简，避免样式污染，组件样式就地维护更直观。
+ */
+
+/* 重置：清除浏览器默认内外边距，统一盒模型为 border-box（宽高包含 padding/border） */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* 占满全屏高度，保证弹性布局 / 渐变背景能铺满视口 */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue',
+    Arial, sans-serif;
+  color: #303133;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
