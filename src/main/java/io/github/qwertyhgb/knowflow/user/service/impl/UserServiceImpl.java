@@ -51,7 +51,7 @@ public class UserServiceImpl implements UserService {
     private final UserMapper userMapper;
 
     /**
-     * BCrypt 密码编码器。
+     * Bcrypt 密码编码器。
      *
      * <p>注册时用 {@link PasswordEncoder#encode(CharSequence)} 哈希明文密码；
      * 登录时用 {@link PasswordEncoder#matches(CharSequence, String)} 校验。
@@ -127,6 +127,7 @@ public class UserServiceImpl implements UserService {
 
         // 统一取一次时间，保证 createdAt 与 updatedAt 精确一致。
         Instant now = clock.instant();
+        // 组装 User 实体，逐字段设置业务数据后统一 insert 落库。
         User user = new User();
         user.setEmail(email);
         // 只保存密码哈希，绝不保存明文密码。
@@ -137,6 +138,7 @@ public class UserServiceImpl implements UserService {
         user.setCreatedAt(now);
         user.setUpdatedAt(now);
 
+        // 执行 insert 落库；MyBatis-Plus 会把自增主键回填到 user.getId()，供下方日志使用。
         userMapper.insert(user);
 
         // 日志只记录系统生成的 userId，不记录邮箱（个人可识别信息）与任何密码相关数据。
@@ -168,6 +170,7 @@ public class UserServiceImpl implements UserService {
     @Override
     public UserLoginVO login(UserLoginRequest request) {
         String email = normalizeEmail(request.getEmail());
+        // 取出明文密码，仅在校验时短暂使用，绝不明文落库或写入日志。
         String password = request.getPassword();
 
         // email 有唯一索引，selectOne 最多返回一条；不存在时返回 null。
@@ -198,6 +201,7 @@ public class UserServiceImpl implements UserService {
      */
     @Override
     public UserVO getById(Long id) {
+        // 按主键查询；查不到时返回 null，由下方统一抛 NOT_FOUND。
         User user = userMapper.selectById(id);
         if (user == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND);
@@ -218,6 +222,7 @@ public class UserServiceImpl implements UserService {
      */
     @Override
     public UserVO updateProfile(Long userId, UserProfileUpdateRequest request) {
+        // 先查出当前用户，确认存在后再更新，避免对不存在的账号做无意义写库。
         User user = userMapper.selectById(userId);
         if (user == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND);
@@ -256,6 +261,7 @@ public class UserServiceImpl implements UserService {
      */
     @Override
     public void logout(Long userId, String token) {
+        // 删除 Redis 登录态记录，使该 token 立即失效；userId 仅用于日志追踪。
         tokenService.revokeToken(token);
         log.info("event=user_logged_out userId={}", userId);
     }
@@ -278,12 +284,14 @@ public class UserServiceImpl implements UserService {
      */
     @Override
     public void changePassword(Long userId, UserChangePasswordRequest request) {
+        // 先按 ID 查出用户，确认账号存在后再继续校验密码。
         User user = userMapper.selectById(userId);
         if (user == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND);
         }
 
         String currentPassword = request.getCurrentPassword();
+        // 校验当前密码是否正确，失败则拒绝修改；此时用户已登录，用专用错误码区分即可。
         if (!passwordEncoder.matches(currentPassword, user.getPasswordHash())) {
             throw new BusinessException(ErrorCode.INVALID_PASSWORD);
         }
