@@ -1,4 +1,5 @@
 import { ElMessage } from 'element-plus'
+import http from './http'
 import { TOKEN_STORAGE_KEY } from '../stores/user'
 
 /**
@@ -55,6 +56,50 @@ export interface RagCitation {
   chunkIndex: number
   chunkText: string
   score: number | null
+}
+
+// ============================================================
+// 会话（Conversation）相关类型
+// ============================================================
+
+/**
+ * 会话概要（ConversationVO）。
+ *
+ * 对应后端 ConversationVO。createdAt/updatedAt 为 ISO-8601 UTC 字符串，
+ * 展示层再转本地时间。
+ */
+export interface ConversationVO {
+  id: number
+  title: string
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * 会话内消息（ConversationMessageVO）。
+ *
+ * 对应后端 ConversationMessageVO：
+ * - role 为 USER / ASSISTANT（后端枚举名），前端视图层再映射为 'user' / 'assistant'；
+ * - citationsJson 是「引用数组」的 JSON 字符串（仅 RAG 对话的 ASSISTANT 消息有值），
+ *   前端需 {@link parseCitationsJson} 解析成 {@link RagCitation}[] 才能渲染引用卡片；
+ *   null 表示本消息无引用（普通消息或用户消息）。
+ */
+export interface ConversationMessageVO {
+  id: number
+  role: 'USER' | 'ASSISTANT'
+  content: string
+  citationsJson: string | null
+  createdAt: string
+}
+
+/**
+ * 会话详情（ConversationDetailVO）。
+ *
+ * 对应后端 ConversationDetailVO：会话信息 + 该会话全部消息（升序）。
+ */
+export interface ConversationDetail {
+  conversation: ConversationVO
+  messages: ConversationMessageVO[]
 }
 
 /** 解析结果：完整事件列表 + 尚未构成完整帧的剩余文本 */
@@ -248,6 +293,182 @@ export function chatStream(message: string, handlers: ChatStreamHandlers): Abort
 export interface RagChatStreamHandlers extends ChatStreamHandlers {
   /** 收到 citations 命名事件（引用来源数组，先于回答到达）时触发 */
   onCitations?: (citations: RagCitation[]) => void
+}
+
+// ============================================================
+// 会话管理（普通 JSON 接口，走 axios）
+// ============================================================
+
+/**
+ * 【为什么会话管理走 axios，而会话内 RAG 流式走 fetch？】
+ * 两者请求形态不同，应各用最合适的工具：
+ * - 会话的增删查（create/list/detail/delete）是<b>普通一次性 JSON 请求</b>，
+ *   响应一次性完整返回——这正是 axios 的强项：自动注入 token、自动解包统一响应
+ *   { code, message, data }、自动错误提示。复用项目已有的 http 实例即可。
+ * - 会话内 RAG 对话是<b>流式 SSE 响应</b>（回答逐块到达），axios 会把整个 body
+ *   缓冲完再返回，拿不到中间分片——必须用 fetch 读流（见文件头注释）。
+ * 所以同一模块里「管理走 axios、对话走 fetch」是两种技术各自适用的结果。
+ */
+
+/** 创建会话。POST /api/ai/conversations，返回新会话（标题为默认「新对话」）。 */
+export function createConversation(): Promise<ConversationVO> {
+  return http.post('/ai/conversations')
+}
+
+/** 我的会话列表（按 updated_at 倒序）。GET /api/ai/conversations */
+export function listConversations(): Promise<ConversationVO[]> {
+  return http.get('/ai/conversations')
+}
+
+/** 会话详情（含全部消息，升序）。GET /api/ai/conversations/{id} */
+export function getConversationDetail(
+  conversationId: number,
+): Promise<ConversationDetail> {
+  return http.get(`/ai/conversations/${conversationId}`)
+}
+
+/** 删除会话（级联删消息）。DELETE /api/ai/conversations/{id} */
+export function deleteConversation(conversationId: number): Promise<void> {
+  return http.delete(`/ai/conversations/${conversationId}`)
+}
+
+/**
+ * 把历史消息落库的 citationsJson（引用数组 JSON 字符串）解析成引用对象数组。
+ *
+ * 【为什么历史消息的引用要防御式解析？】citationsJson 是后端落库后再次读出的 JSON，
+ * 理论上可靠，但任何持久化数据都可能遇到版本演进、历史脏数据等情况；
+ * 若这里直接 JSON.parse 抛异常，会让「重开会话」整页崩溃。防御式处理：
+ * null / 空串 → 空数组（无引用）；解析失败 → 空数组 + console.warn（降级为「无引用」），
+ * 保证引用展示失败绝不影响消息正文与页面可用性。
+ */
+export function parseCitationsJson(json: string | null | undefined): RagCitation[] {
+  if (!json) return []
+  try {
+    return JSON.parse(json) as RagCitation[]
+  } catch (e) {
+    console.warn('[aiChat] citationsJson 解析失败，已降级为空引用', e)
+    return []
+  }
+}
+
+/**
+ * 会话内 RAG 流式对话。
+ *
+ * <p>【为什么复制一份 ragChatStream 而不是改它？】ragChatStream 是「无会话」版本
+ * （POST /api/ai/rag/chat/stream），本函数是「会话内」版本
+ * （POST /api/ai/conversations/{conversationId}/messages/rag/stream）——两个接口形态不同
+ * （有/无会话），后端两者并存。为了不破坏无会话接口的既有使用方，前端保留两版；
+ * 唯一的实质差异是请求路径（多了 conversationId 路径段），请求体完全一致
+ * （{ question, topK, scoreThreshold }），SSE 帧解析与事件分发完全复用
+ * 文件内的 parseSse / dispatchEvent。等后端下线无会话接口后再删除 ragChatStream。</p>
+ *
+ * @param conversationId 目标会话 ID
+ * @param question       用户问题
+ * @param topK           召回候选数（1~20）
+ * @param scoreThreshold 相似度阈值（0~1）
+ * @param handlers       回调（含可选的 onCitations）
+ * @returns AbortController，调用方调用 .abort() 可中断本次请求
+ */
+export function conversationRagChatStream(
+  conversationId: number,
+  question: string,
+  topK: number,
+  scoreThreshold: number,
+  handlers: RagChatStreamHandlers,
+): AbortController {
+  const controller = new AbortController()
+  const token = localStorage.getItem(TOKEN_STORAGE_KEY)
+
+  // 与 ragChatStream 相同的「把 citations 命名事件 → JSON.parse → onCitations」组合回调
+  const combinedHandlers: ChatStreamHandlers = {
+    onChunk: handlers.onChunk,
+    onError: handlers.onError,
+    onDone: handlers.onDone,
+    onEvent: (event, data) => {
+      if (event === 'citations') {
+        try {
+          handlers.onCitations?.(JSON.parse(data) as RagCitation[])
+        } catch {
+          // 引用解析失败不应中断回答流
+        }
+      } else {
+        handlers.onEvent?.(event, data)
+      }
+    },
+  }
+
+  void (async () => {
+    try {
+      // 与 ragChatStream 唯一差异：路径带 conversationId。
+      // 底层的读流 / TextDecoder 流式解码 / SSE 拆帧 / 401 处理 / abort 完全一致。
+      const response = await fetch(`/api/ai/conversations/${conversationId}/messages/rag/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ question, topK, scoreThreshold }),
+        signal: controller.signal,
+      })
+
+      // ---- 401：登录态失效（与 ragChatStream 相同处理）----
+      if (response.status === 401) {
+        ElMessage.warning('登录已过期，请重新登录')
+        handlers.onError('登录已过期，请重新登录')
+        localStorage.removeItem(TOKEN_STORAGE_KEY)
+        setTimeout(() => {
+          window.location.href = '/login'
+        }, 800)
+        return
+      }
+
+      // ---- 非 200（如 400 参数错误、503 AI 不可用）----
+      if (!response.ok) {
+        let errorMessage = 'AI 服务暂时不可用，请稍后重试'
+        try {
+          const body = (await response.json()) as { message?: string }
+          if (body?.message) errorMessage = body.message
+        } catch {
+          // 响应体不是 JSON，用默认文案
+        }
+        handlers.onError(errorMessage)
+        return
+      }
+
+      // ---- 200：进入流式读取 ----
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const { events, rest } = parseSse(buffer)
+        buffer = rest
+
+        for (const e of events) {
+          dispatchEvent(e, combinedHandlers)
+        }
+      }
+
+      buffer += decoder.decode()
+      const { events } = parseSse(buffer)
+      for (const e of events) {
+        dispatchEvent(e, combinedHandlers)
+      }
+
+      handlers.onDone()
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        return
+      }
+      handlers.onError('网络异常，请稍后重试')
+    }
+  })()
+
+  return controller
 }
 
 /**
