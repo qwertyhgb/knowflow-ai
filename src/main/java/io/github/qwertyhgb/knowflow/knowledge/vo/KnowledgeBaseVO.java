@@ -42,10 +42,21 @@ public class KnowledgeBaseVO {
     /** 当前请求用户在该知识库的成员角色；可为 null（非该知识库成员，如 PUBLIC 知识库的非成员）。 */
     private final KnowledgeBaseMemberRole myRole;
 
-    private KnowledgeBaseVO(Long id, Long enterpriseId, String name, String description,
-                            KnowledgeBaseAccessMode accessMode, Long ownerUserId,
-                            KnowledgeBaseStatus status, Instant createdAt,
-                            KnowledgeBaseMemberRole myRole) {
+    /**
+     * 唯一构造器（public）。
+     *
+     * <p>Phase 14 知识库缓存把 {@code List<KnowledgeBaseVO>} 序列化为 JSON 存入 Redis，
+     * 命中缓存时需要把 JSON 反序列化回 VO。本类字段全部 {@code final} 且没有无参
+     * 构造器；Jackson 3（tools.jackson）默认<strong>只能对 public 构造器做参数名
+     * 推断</strong>作为 Creator（编译已启用 {@code -parameters}），private 构造器
+     * 无法反序列化（项目先例见 {@code ConversationMessageVO} 注释：{@code @JsonCreator}
+     * 注解模块未暴露到编译 classpath）。因此构造器必须 public，字段由工厂方法
+     * {@link #from(KnowledgeBase, KnowledgeBaseMemberRole)} 保持封装。</p>
+     */
+    public KnowledgeBaseVO(Long id, Long enterpriseId, String name, String description,
+                           KnowledgeBaseAccessMode accessMode, Long ownerUserId,
+                           KnowledgeBaseStatus status, Instant createdAt,
+                           KnowledgeBaseMemberRole myRole) {
         this.id = id;
         this.enterpriseId = enterpriseId;
         this.name = name;

@@ -18,12 +18,13 @@ public interface RagChatService {
      * LLM 回答 → Answer + Citation</strong>。若过滤后没有可用的相关块，
      * 直接返回友好提示而不调用 LLM（没有资料硬答只会编造）。</p>
      *
+     * @param userId         当前登录用户 ID：RAG 会调用付费 LLM（token 计费），需按用户限流
      * @param question       用户问题
      * @param topK           召回候选数（1~20，调用方已校验）
      * @param scoreThreshold 相似度阈值（0.0~1.0，低于此分数的块丢弃）
      * @return 模型回答 + 引用来源数组
      */
-    RagChatVO chat(String question, int topK, double scoreThreshold);
+    RagChatVO chat(Long userId, String question, int topK, double scoreThreshold);
 
     /**
      * RAG 对话（流式 SSE）。
@@ -37,10 +38,11 @@ public interface RagChatService {
      * SseEmitter 是 MVC 原生 SSE 机制，无需引入 WebFlux 全家桶；Flux 是 Spring AI
      * 内部返回的响应式流，我们在 Service 里消费它并手动转发到 SseEmitter。</p>
      *
+     * @param userId         当前登录用户 ID：流式同样消耗 token，必须与同步一起限流
      * @param question       用户问题
      * @param topK           召回候选数（1~20，调用方已校验）
      * @param scoreThreshold 相似度阈值（0.0~1.0，低于此分数的块丢弃）
      * @param emitter        由 Controller 创建并返回给框架的 SSE 发射器
      */
-    void chatStream(String question, int topK, double scoreThreshold, SseEmitter emitter);
+    void chatStream(Long userId, String question, int topK, double scoreThreshold, SseEmitter emitter);
 }

@@ -3,9 +3,11 @@ package io.github.qwertyhgb.knowflow.ai.controller;
 import io.github.qwertyhgb.knowflow.ai.dto.request.AiChatRequest;
 import io.github.qwertyhgb.knowflow.ai.service.AiChatService;
 import io.github.qwertyhgb.knowflow.ai.vo.AiChatResponse;
+import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -49,8 +51,12 @@ public class AiChatController {
     private static final long STREAM_TIMEOUT_MS = 120_000L;
 
     @PostMapping
-    public Result<AiChatResponse> chat(@Valid @RequestBody AiChatRequest aiChatRequest) {
-        String reply = aiChatService.chat(aiChatRequest.getMessage());
+    public Result<AiChatResponse> chat(Authentication authentication,
+                                       @Valid @RequestBody AiChatRequest aiChatRequest) {
+        // 从认证主体取 userId 传给 Service：限流必须按用户维度（付费调用防刷），
+        // 遵循项目既有的 EnterpriseUser principal 模式（与会话/工单控制器一致）。
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
+        String reply = aiChatService.chat(userId, aiChatRequest.getMessage());
         return Result.success(AiChatResponse.of(reply));
     }
 
@@ -73,11 +79,13 @@ public class AiChatController {
      * @return {@link SseEmitter}，由 Spring MVC 接管其生命周期并流式写出响应
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(@Valid @RequestBody AiChatRequest aiChatRequest) {
+    public SseEmitter chatStream(Authentication authentication,
+                                 @Valid @RequestBody AiChatRequest aiChatRequest) {
         // 在 Controller 层创建 SseEmitter 并返回，Service 只负责「往里面推分片」。
         // 超时显式设为 120 秒，避免长连接被默认短超时提前掐断。
+        Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
         SseEmitter emitter = new SseEmitter(STREAM_TIMEOUT_MS);
-        aiChatService.chatStream(aiChatRequest.getMessage(), emitter);
+        aiChatService.chatStream(userId, aiChatRequest.getMessage(), emitter);
         return emitter;
     }
 }

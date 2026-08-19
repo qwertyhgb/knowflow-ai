@@ -195,7 +195,20 @@ public enum ErrorCode {
     /** 操作要求工单已有处理人(客服),但工单尚未分配(assignee 为 null),固定 400。
      * 属防御性错误码:正常流程下状态机保证进入处理中/解决前必有分配动作,
      * 此错误码用于拦截数据漂移(如手工改库导致的非 OPEN 状态但无 assignee)。 */
-    TICKET_NOT_ASSIGNED("TICKET_NOT_ASSIGNED", "工单尚未分配客服", HttpStatus.BAD_REQUEST);
+    TICKET_NOT_ASSIGNED("TICKET_NOT_ASSIGNED", "工单尚未分配客服", HttpStatus.BAD_REQUEST),
+
+    /** 请求被限流(用户在某时间窗口内调用过于频繁),固定 429。
+     * 【为什么用 429?】429 Too Many Requests 是语义最明确的状态码:
+     * 客户端(用户/脚本)触发了服务端的频率限制,前端可据此提示「操作太频繁」并
+     * 引导稍后重试——区别于 400(参数错)、403(没权限)、503(服务故障)。
+     * 限流保护的对象是付费的 AI 外部依赖(按 token 计费),超限拒绝是成本防线。 */
+    RATE_LIMITED("RATE_LIMITED", "请求过于频繁,请稍后再试", HttpStatus.TOO_MANY_REQUESTS),
+
+    /** 目标资源正在被另一个请求处理中(如文档向量化已被并发触发),固定 409。
+     * 与 TICKET_INVALID_TRANSITION 同族:请求本身合法,失败原因是与「资源当前
+     * 状态」冲突——资源正在处理中,不宜重复执行(重复执行 = 重复调用付费
+     * embedding),明确告知调用方「正在处理」比静默等待或重复执行更友好。 */
+    VECTORIZE_IN_PROGRESS("VECTORIZE_IN_PROGRESS", "该文档正在向量化处理中", HttpStatus.CONFLICT);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;

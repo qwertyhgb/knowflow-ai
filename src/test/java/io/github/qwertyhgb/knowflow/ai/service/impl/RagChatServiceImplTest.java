@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.ai.service.impl;
 
+import io.github.qwertyhgb.knowflow.ai.rate.RateLimitService;
 import io.github.qwertyhgb.knowflow.ai.service.SemanticSearchService;
 import io.github.qwertyhgb.knowflow.ai.vo.RagChatVO;
 import io.github.qwertyhgb.knowflow.ai.vo.RagCitationVO;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
@@ -76,11 +78,17 @@ class RagChatServiceImplTest {
     @Mock
     private JsonMapper jsonMapper;
 
+    /** 用户维限流服务 mock：既有用例默认放行，限流触发由专用用例覆盖。 */
+    @Mock
+    private RateLimitService rateLimitService;
+
     private RagChatServiceImpl ragChatService;
 
     @BeforeEach
     void setUp() {
-        ragChatService = new RagChatServiceImpl(semanticSearchService, chatClientProvider, jsonMapper);
+        ragChatService = new RagChatServiceImpl(semanticSearchService, chatClientProvider, jsonMapper, rateLimitService);
+        // 默认放行限流，让既有用例专注于 RAG 逻辑；「超限拒绝」的用例单独桩返回 false。
+        when(rateLimitService.tryAcquire(anyLong(), anyString())).thenReturn(true);
     }
 
     /** 构造一个测试检索块。 */
@@ -102,7 +110,7 @@ class RagChatServiceImplTest {
         when(promptSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn("根据资料[1]，Redis 缓存能显著降低数据库查询压力。");
 
-        RagChatVO vo = ragChatService.chat("如何提升系统查询速度", 5, 0.3);
+        RagChatVO vo = ragChatService.chat(1L, "如何提升系统查询速度", 5, 0.3);
 
         // 回答原样透传
         assertEquals("根据资料[1]，Redis 缓存能显著降低数据库查询压力。", vo.getReply());
@@ -139,7 +147,7 @@ class RagChatServiceImplTest {
                 block(1L, 2, "块C", 0.1)));
         when(chatClientProvider.getIfAvailable()).thenReturn(chatClient);
 
-        RagChatVO vo = ragChatService.chat("问题", 5, 0.7);
+        RagChatVO vo = ragChatService.chat(1L, "问题", 5, 0.7);
 
         // 返回友好提示 + 空引用，且 LLM 不被调用（省成本 + 不编造）
         assertTrue(vo.getReply().contains("没有找到与您问题相关的内容"));
@@ -160,7 +168,7 @@ class RagChatServiceImplTest {
         when(callResponseSpec.content()).thenThrow(new RuntimeException("upstream timeout"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> ragChatService.chat("问题", 5, 0.3));
+                () -> ragChatService.chat(1L, "问题", 5, 0.3));
 
         assertEquals(ErrorCode.AI_SERVICE_UNAVAILABLE, exception.getErrorCode());
     }
@@ -171,7 +179,7 @@ class RagChatServiceImplTest {
         when(chatClientProvider.getIfAvailable()).thenReturn(null);
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> ragChatService.chat("问题", 5, 0.3));
+                () -> ragChatService.chat(1L, "问题", 5, 0.3));
 
         assertEquals(ErrorCode.AI_SERVICE_UNAVAILABLE, exception.getErrorCode());
         // 判空前置：LLM 不可用时不浪费一次检索调用
@@ -190,7 +198,7 @@ class RagChatServiceImplTest {
         when(promptSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn("基于[1]回答");
 
-        RagChatVO vo = ragChatService.chat("问题", 5, 0.3);
+        RagChatVO vo = ragChatService.chat(1L, "问题", 5, 0.3);
 
         // null 分数块被保留：citations 有 1 条且 score 为 null
         assertEquals(1, vo.getCitations().size());
@@ -246,7 +254,7 @@ class RagChatServiceImplTest {
         CountDownLatch completionLatch = new CountDownLatch(1);
         SseEmitter emitter = spyEmitter(events, completionLatch);
 
-        ragChatService.chatStream("问题", 5, 0.3, emitter);
+        ragChatService.chatStream(1L, "问题", 5, 0.3, emitter);
 
         // 等待流完成：citations 事件 + 2 个回答分片 + complete
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
@@ -280,7 +288,7 @@ class RagChatServiceImplTest {
         CountDownLatch completionLatch = new CountDownLatch(1);
         SseEmitter emitter = spyEmitter(events, completionLatch);
 
-        ragChatService.chatStream("问题", 5, 0.7, emitter);
+        ragChatService.chatStream(1L, "问题", 5, 0.7, emitter);
 
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
         // 只发了一条 data 提示文本
@@ -301,7 +309,7 @@ class RagChatServiceImplTest {
         CountDownLatch completionLatch = new CountDownLatch(1);
         SseEmitter emitter = spyEmitter(events, completionLatch);
 
-        ragChatService.chatStream("问题", 5, 0.3, emitter);
+        ragChatService.chatStream(1L, "问题", 5, 0.3, emitter);
 
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
         // 只发了一条 error 事件
@@ -331,7 +339,7 @@ class RagChatServiceImplTest {
         CountDownLatch completionLatch = new CountDownLatch(1);
         SseEmitter emitter = spyEmitter(events, completionLatch);
 
-        ragChatService.chatStream("问题", 5, 0.3, emitter);
+        ragChatService.chatStream(1L, "问题", 5, 0.3, emitter);
 
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
         // 2 次 send：1 次 citations + 1 次 error 事件
@@ -343,5 +351,47 @@ class RagChatServiceImplTest {
         assertTrue(sentText.contains("event:error"), "流失败后应发送 error 事件");
         assertTrue(sentText.contains(ErrorCode.AI_SERVICE_UNAVAILABLE.getMessage()),
                 "error 事件应携带 AI 不可用文案");
+    }
+
+    // ==================== 限流测试 ====================
+
+    @Test
+    void shouldRejectWhenRateLimited() {
+        // 场景：RAG 限流器判定超限 → 直接抛 429。
+        // 【为什么 RAG 也要限流？】RAG 最终调用付费 LLM（token 计费），超限不拒绝 = 费用被刷。
+        // 拒绝必须发生在任何检索/LLM 调用之前。
+        when(rateLimitService.tryAcquire(1L, "ai_rag")).thenReturn(false);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> ragChatService.chat(1L, "问题", 5, 0.3));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝时不触发检索（不花 embedding 的检索成本）
+        verify(semanticSearchService, never()).search(anyString(), anyInt());
+    }
+
+    @Test
+    void shouldRejectStreamWhenRateLimited() throws Exception {
+        // 场景：流式 RAG 超限 → 429（尚未推流，异常可转 HTTP 状态码而非 error 事件）
+        when(rateLimitService.tryAcquire(1L, "ai_rag")).thenReturn(false);
+
+        SseEmitter emitter = spy(new SseEmitter(120_000L));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> ragChatService.chatStream(1L, "问题", 5, 0.3, emitter));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝时不发送任何 SSE 事件
+        verify(emitter, never()).send(any(SseEmitter.SseEventBuilder.class));
+    }
+
+    @Test
+    void shouldUseRagActionKeyForRateLimit() {
+        // 场景：RAG 对话使用独立的 "ai_rag" 动作标识计数（与普通 AI 对话分开预算）
+        when(rateLimitService.tryAcquire(1L, "ai_rag")).thenReturn(false);
+
+        assertThrows(BusinessException.class, () -> ragChatService.chat(1L, "问题", 5, 0.3));
+
+        verify(rateLimitService).tryAcquire(1L, "ai_rag");
     }
 }

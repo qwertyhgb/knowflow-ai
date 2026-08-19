@@ -22,14 +22,19 @@ import io.github.qwertyhgb.knowflow.knowledge.enums.KnowledgeBaseMemberRole;
 import io.github.qwertyhgb.knowflow.knowledge.enums.KnowledgeBaseStatus;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMapper;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMemberMapper;
+import io.github.qwertyhgb.knowflow.knowledge.service.KnowledgeBaseCacheKeys;
 import io.github.qwertyhgb.knowflow.knowledge.service.KnowledgeBaseService;
 import io.github.qwertyhgb.knowflow.knowledge.vo.KnowledgeBaseMemberVO;
 import io.github.qwertyhgb.knowflow.knowledge.vo.KnowledgeBaseVO;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -92,6 +97,24 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
     /** 可注入的 UTC 时钟，便于测试冻结创建时间。 */
     private final Clock clock;
 
+    /** Redis 字符串模板：Cache Aside 缓存的读写入口（与 TokenService 同款）。 */
+    private final StringRedisTemplate redisTemplate;
+
+    /** Jackson 3 统一 JSON 工具：缓存值序列化/反序列化（与全项目同一 Bean）。 */
+    private final JsonMapper jsonMapper;
+
+    /**
+     * 详情缓存空值标记：知识库查询不到（或当前用户无权限）时缓存这个特殊字符串
+     * 而非真实 JSON。它是防缓存穿透的手段——「不存在」也被缓存，下次同样查询
+     * 不再反复打数据库。真实 VO 序列化结果必以 {@code {}} 开头，不会与它混淆。
+     */
+    private static final String CACHE_NULL_MARKER = "NULL";
+
+    /** 类型引用：把缓存 JSON 反序列化为 {@code List<KnowledgeBaseVO>} 时使用。 */
+    private static final TypeReference<List<KnowledgeBaseVO>> LIST_VO_TYPE =
+            new TypeReference<List<KnowledgeBaseVO>>() {
+            };
+
     /** 企业级可管理知识库的角色编码集合（企业所有者与管理员可管理企业内全部知识库）。 */
     private static final Set<String> ENTERPRISE_MANAGER_ROLES = Set.of("OWNER", "ADMIN");
 
@@ -100,13 +123,17 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
                                     EnterpriseMembershipChecker membershipChecker,
                                     EnterpriseMemberMapper enterpriseMemberMapper,
                                     EnterpriseRoleMapper enterpriseRoleMapper,
-                                    Clock clock) {
+                                    Clock clock,
+                                    StringRedisTemplate redisTemplate,
+                                    JsonMapper jsonMapper) {
         this.knowledgeBaseMapper = knowledgeBaseMapper;
         this.knowledgeBaseMemberMapper = knowledgeBaseMemberMapper;
         this.membershipChecker = membershipChecker;
         this.enterpriseMemberMapper = enterpriseMemberMapper;
         this.enterpriseRoleMapper = enterpriseRoleMapper;
         this.clock = clock;
+        this.redisTemplate = redisTemplate;
+        this.jsonMapper = jsonMapper;
     }
 
     @Override
@@ -148,6 +175,13 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         // 只记录系统标识，不记录用户提交的知识库名称或描述。
         log.info("event=knowledge_base_created enterpriseId={} knowledgeBaseId={} ownerId={}",
                 enterpriseId, knowledgeBase.getId(), userId);
+
+        // ==================== Cache Aside 写路径：失效列表缓存 ====================
+        // 新知识库会进入列表：创建者（PRIVATE 库）或企业全部成员（PUBLIC 库）。
+        // 列表键按用户分键，直接按企业通配 pattern 整组失效，统一且无害。
+        // 详情键是新 ID、此前不可能有缓存（没人查过不存在的 ID——即便查过也只会
+        // 留下空值标记，短 TTL 很快自然过期），所以只需删列表键，无需删详情键。
+        evictListCachesForEnterprise(enterpriseId);
         return knowledgeBase;
     }
 
@@ -155,9 +189,27 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
     @Transactional(readOnly = true)
     public List<KnowledgeBaseVO> listVisibleKnowledgeBases(Long userId, Long enterpriseId) {
         // 1. 与其他企业作用域查询一致：先判断企业是否存在，再校验正常成员身份（先资源后权限）。
+        //    注意：缓存不能替代权限校验——用户退出企业后必须立即失去可见性，
+        //    所以权限校验始终执行，缓存只替换「知识库数据的查询」。
         membershipChecker.requireEnterprise(enterpriseId);
         membershipChecker.requireActiveMember(userId, enterpriseId);
 
+        // ==================== Cache Aside 读路径：先查缓存 ====================
+        // 命中 → 反序列化返回，不查数据库（省掉下面两次 DB 查询）。
+        String cacheKey = KnowledgeBaseCacheKeys.listKey(enterpriseId, userId);
+        String cached = getCache(cacheKey);
+        if (cached != null) {
+            try {
+                return jsonMapper.readValue(cached, LIST_VO_TYPE);
+            } catch (RuntimeException ex) {
+                // 缓存内容损坏（如升级后 JSON 结构变化）：降级走数据库并重建缓存，
+                // 而不是把损坏数据抛给用户或一直报错。日志只记键名，不记内容。
+                log.warn("event=kb_cache_deserialize_failed cacheKey={} errorType={}",
+                        cacheKey, ex.getClass().getSimpleName());
+            }
+        }
+
+        // ==================== 未命中：查数据库 ====================
         // 2. 一次查出当前企业下全部 NORMAL 知识库，按 createdAt、id 倒序（新建在前、稳定排序）。
         List<KnowledgeBase> knowledgeBases = knowledgeBaseMapper.selectList(
                 new LambdaQueryWrapper<KnowledgeBase>()
@@ -166,6 +218,9 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
                         .orderByDesc(KnowledgeBase::getCreatedAt)
                         .orderByDesc(KnowledgeBase::getId));
         if (knowledgeBases.isEmpty()) {
+            // 空结果也缓存（"[]"），TTL 用短的空值 TTL——防缓存穿透：列表为空也是
+            // 一种高频查询结果，不缓存会让每次请求都白查数据库。
+            putCache(cacheKey, "[]", Duration.ofSeconds(KnowledgeBaseCacheKeys.EMPTY_TTL_SECONDS));
             return List.of();
         }
 
@@ -186,27 +241,56 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         //    （PRIVATE 且非成员 → 不泄露存在性，与 getKnowledgeBase 的隐私设计一致）。
         //    filter 保留满足条件的项，原流顺序（createdAt 倒序、id 倒序）保持不变，
         //    满足条件即生成 VO：成员 → 带 myRole；PUBLIC 非成员 → myRole 为 null。
-        return knowledgeBases.stream()
+        List<KnowledgeBaseVO> result = knowledgeBases.stream()
                 .filter(kb -> kb.getAccessMode() == KnowledgeBaseAccessMode.PUBLIC
                         || roleByKnowledgeBaseId.containsKey(kb.getId()))
                 .map(kb -> KnowledgeBaseVO.from(kb, roleByKnowledgeBaseId.get(kb.getId())))
                 .toList();
+
+        // ==================== 回填缓存 ====================
+        // 非空结果用「基础 TTL + 随机抖动」——同批写入的键过期时间错开，防雪崩。
+        putCache(cacheKey, jsonMapper.writeValueAsString(result),
+                KnowledgeBaseCacheKeys.randomTtl(KnowledgeBaseCacheKeys.LIST_TTL_SECONDS));
+        return result;
     }
 
     @Override
     @Transactional(readOnly = true)
     public KnowledgeBaseVO getKnowledgeBase(Long userId, Long enterpriseId, Long knowledgeBaseId) {
         // 1. 先判断企业是否存在，再校验正常成员身份（先资源后权限）。
+        //    与列表一致：权限校验永远执行，缓存只替换数据查询。
         membershipChecker.requireEnterprise(enterpriseId);
         membershipChecker.requireActiveMember(userId, enterpriseId);
 
+        // ==================== Cache Aside 读路径：先查缓存 ====================
+        String cacheKey = KnowledgeBaseCacheKeys.detailKey(enterpriseId, knowledgeBaseId, userId);
+        String cached = getCache(cacheKey);
+        if (cached != null) {
+            // 缓存的是空值标记（上一次查询「不存在/无权限」）→ 直接 404，
+            // 不再打数据库——这就是缓存穿透防护：「不存在」也有缓存。
+            if (CACHE_NULL_MARKER.equals(cached)) {
+                throw new BusinessException(ErrorCode.NOT_FOUND);
+            }
+            try {
+                return jsonMapper.readValue(cached, KnowledgeBaseVO.class);
+            } catch (RuntimeException ex) {
+                // 缓存内容损坏：降级走数据库并重建缓存（理由同列表）。
+                log.warn("event=kb_cache_deserialize_failed cacheKey={} errorType={}",
+                        cacheKey, ex.getClass().getSimpleName());
+            }
+        }
+
+        // ==================== 未命中：查数据库 ====================
         // 2. 用「id + enterpriseId」组合定位知识库，防止跨企业读取（多租户越权防护）。
         KnowledgeBase knowledgeBase = knowledgeBaseMapper.selectOne(
                 new LambdaQueryWrapper<KnowledgeBase>()
                         .eq(KnowledgeBase::getId, knowledgeBaseId)
                         .eq(KnowledgeBase::getEnterpriseId, enterpriseId));
         // 不存在或已禁用（DISABLED）都按「不存在」处理：不泄露知识库是否真实存在及其状态。
+        // 404 前回填空值缓存（短 TTL）——防穿透，让「不存在」的查询也有缓存可命中。
         if (knowledgeBase == null || knowledgeBase.getStatus() != KnowledgeBaseStatus.NORMAL) {
+            putCache(cacheKey, CACHE_NULL_MARKER,
+                    Duration.ofSeconds(KnowledgeBaseCacheKeys.EMPTY_TTL_SECONDS));
             throw new BusinessException(ErrorCode.NOT_FOUND);
         }
 
@@ -217,14 +301,24 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
                         .eq(KnowledgeBaseMember::getUserId, userId));
 
         // 4. 可见性判定：成员 → 返回带 myRole；非成员但 PUBLIC → 返回 myRole=null。
-        //    非成员且 PRIVATE → 404（隐私保护：不泄露知识库存在性，而非明确告知无权访问）。
+        //    非成员且 PRIVATE → 404（隐私保护：不泄露知识库存在性，而非明确告知无权访问），
+        //    同样回填空值缓存（该用户对该知识库的查询短时间不再打数据库）。
+        KnowledgeBaseVO vo;
         if (myMembership != null) {
-            return KnowledgeBaseVO.from(knowledgeBase, myMembership.getMemberRole());
+            vo = KnowledgeBaseVO.from(knowledgeBase, myMembership.getMemberRole());
+        } else if (knowledgeBase.getAccessMode() == KnowledgeBaseAccessMode.PUBLIC) {
+            vo = KnowledgeBaseVO.from(knowledgeBase, null);
+        } else {
+            putCache(cacheKey, CACHE_NULL_MARKER,
+                    Duration.ofSeconds(KnowledgeBaseCacheKeys.EMPTY_TTL_SECONDS));
+            throw new BusinessException(ErrorCode.NOT_FOUND);
         }
-        if (knowledgeBase.getAccessMode() == KnowledgeBaseAccessMode.PUBLIC) {
-            return KnowledgeBaseVO.from(knowledgeBase, null);
-        }
-        throw new BusinessException(ErrorCode.NOT_FOUND);
+
+        // ==================== 回填缓存 ====================
+        // 正常结果用基础 TTL + 随机抖动（防雪崩）。
+        putCache(cacheKey, jsonMapper.writeValueAsString(vo),
+                KnowledgeBaseCacheKeys.randomTtl(KnowledgeBaseCacheKeys.DETAIL_TTL_SECONDS));
+        return vo;
     }
 
     @Override
@@ -261,6 +355,14 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
 
         log.info("event=knowledge_base_member_added enterpriseId={} knowledgeBaseId={} memberUserId={} operatorId={}",
                 enterpriseId, knowledgeBaseId, targetUserId, userId);
+
+        // ==================== Cache Aside 写路径：成员变化 → 失效列表 + 详情缓存 ====================
+        // 成员变动会改变<strong>多个用户</strong>的可见性（新成员加入后该库进入其列表；
+        // 移除后从列表中消失）与详情 myRole。列表/详情缓存按「用户维度」分键，受影响
+        // 的用户无法逐一枚举，所以用通配 pattern 整组失效该企业在列表缓存、该库的详情
+        // 缓存——下个请求自然回源数据库重建。成员操作低频，全量失效的成本可忽略。
+        evictListCachesForEnterprise(enterpriseId);
+        evictDetailCachesForKnowledgeBase(enterpriseId, knowledgeBaseId);
         return KnowledgeBaseMemberVO.from(member);
     }
 
@@ -304,6 +406,10 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         log.info("event=knowledge_base_member_role_updated enterpriseId={} knowledgeBaseId={} "
                         + "memberUserId={} newRole={} operatorId={}",
                 enterpriseId, knowledgeBaseId, targetUserId, request.getMemberRole(), userId);
+
+        // 角色变化同样影响目标用户对该库的 myRole 与可见性：整组失效（理由同成员新增）。
+        evictListCachesForEnterprise(enterpriseId);
+        evictDetailCachesForKnowledgeBase(enterpriseId, knowledgeBaseId);
         return KnowledgeBaseMemberVO.from(target);
     }
 
@@ -326,6 +432,11 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         if (deletedCount != 1) {
             throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_MEMBER_NOT_FOUND);
         }
+
+        // 成员被移除：该用户列表不再显示此库、其他成员的 myRole 判断也受影响，整组失效
+        // （理由同成员新增）。
+        evictListCachesForEnterprise(enterpriseId);
+        evictDetailCachesForKnowledgeBase(enterpriseId, knowledgeBaseId);
         log.info("event=knowledge_base_member_removed enterpriseId={} knowledgeBaseId={} "
                         + "memberUserId={} operatorId={}",
                 enterpriseId, knowledgeBaseId, targetUserId, userId);
@@ -360,6 +471,13 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         target.setDescription(request.getDescription());
         target.setAccessMode(request.getAccessMode());
         target.setUpdatedAt(updatedAt);
+
+        // ==================== Cache Aside 写路径：更新 → 失效列表 + 详情缓存 ====================
+        // 改名/改描述/改 accessMode 都会改变列表显示内容与详情数据（accessMode 变化还会
+        // 影响「哪些用户可见」——PUBLIC 改 PRIVATE 后非成员应不再可见），列表与详情
+        // 缓存都必须整组失效，让所有用户下次查询回源数据库。
+        evictListCachesForEnterprise(enterpriseId);
+        evictDetailCachesForKnowledgeBase(enterpriseId, knowledgeBaseId);
         log.info("event=knowledge_base_updated enterpriseId={} knowledgeBaseId={} operatorId={}",
                 enterpriseId, knowledgeBaseId, userId);
         return KnowledgeBaseVO.from(target);
@@ -383,6 +501,10 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         if (deletedCount != 1) {
             throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND);
         }
+
+        // 删除后该库从所有用户列表与详情中消失：列表 + 详情缓存整组失效。
+        evictListCachesForEnterprise(enterpriseId);
+        evictDetailCachesForKnowledgeBase(enterpriseId, knowledgeBaseId);
         log.info("event=knowledge_base_deleted enterpriseId={} knowledgeBaseId={} operatorId={}",
                 enterpriseId, knowledgeBaseId, userId);
     }
@@ -395,6 +517,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         KnowledgeBase target = requireKnowledgeBaseManager(userId, enterpriseId, knowledgeBaseId);
 
         // 2. 同状态请求幂等返回，不产生无意义写入和更新时间变化。
+        //    数据没有变化，缓存依然正确，因此幂等分支不失效缓存。
         KnowledgeBaseStatus targetStatus = request.getStatus();
         if (target.getStatus() == targetStatus) {
             return KnowledgeBaseVO.from(target);
@@ -414,10 +537,82 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
 
         target.setStatus(targetStatus);
         target.setUpdatedAt(updatedAt);
+
+        // 状态变更（NORMAL ↔ DISABLED）直接决定「用户可见性」（DISABLED 一律不可见）：
+        // 列表与详情缓存整组失效，让可见性变化立即生效。
+        evictListCachesForEnterprise(enterpriseId);
+        evictDetailCachesForKnowledgeBase(enterpriseId, knowledgeBaseId);
         log.info("event=knowledge_base_status_updated enterpriseId={} knowledgeBaseId={} "
                         + "newStatus={} operatorId={}",
                 enterpriseId, knowledgeBaseId, targetStatus, userId);
         return KnowledgeBaseVO.from(target);
+    }
+
+    // ==================== 缓存私有方法（Cache Aside 容错要点） ====================
+    //
+    // 所有缓存读写都包 try-catch 降级：缓存是「加速」而不是「正确性依赖」——
+    // Redis 故障时查询降级为直接走数据库（多一次 DB 查询而已），业务照常返回，
+    // 绝不能让缓存故障拖垮主链路。这是 Cache Aside 与业务数据隔离的容错底线，
+    // 缓存侧的异常只记 WARN（日志白名单：只记键名与异常类型名，不记缓存内容）。
+
+    /**
+     * 读缓存（GET）：Redis 异常时返回 {@code null}，调用方按未命中处理并回源数据库。
+     */
+    private String getCache(String cacheKey) {
+        try {
+            return redisTemplate.opsForValue().get(cacheKey);
+        } catch (RuntimeException ex) {
+            log.warn("event=kb_cache_read_failed cacheKey={} errorType={}",
+                    cacheKey, ex.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * 写缓存（SET + TTL）：Redis 异常时只记 WARN，不影响已完成的数据库操作。
+     */
+    private void putCache(String cacheKey, String json, Duration ttl) {
+        try {
+            redisTemplate.opsForValue().set(cacheKey, json, ttl);
+        } catch (RuntimeException ex) {
+            log.warn("event=kb_cache_write_failed cacheKey={} errorType={}",
+                    cacheKey, ex.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 失效某企业下全部用户的列表缓存（写路径统一入口）。
+     *
+     * <p>为什么要整组删而不是一条条删：列表缓存按「用户 × 企业」分键，写操作影响的
+     * 用户集合无法精确枚举（如 PUBLIC 库对全企业成员可见），只能按通配 pattern
+     * 匹配这批键统一删除。</p>
+     *
+     * <p><strong>用 Key 通配而非逐键</strong>：{@code keys(pattern)} 会遍历全库匹配
+     * （生产大 Key 场景有性能风险，真实系统用 {@code SCAN} 游标迭代分批删除；
+     * 教学阶段键量小、删除低频，用 keys 直截了当——注释里说明两者的取舍）。</p>
+     */
+    private void evictListCachesForEnterprise(Long enterpriseId) {
+        evictByPattern(KnowledgeBaseCacheKeys.listPattern(enterpriseId));
+    }
+
+    /**
+     * 失效某知识库下全部用户的详情缓存（写路径统一入口），理由同列表。
+     */
+    private void evictDetailCachesForKnowledgeBase(Long enterpriseId, Long knowledgeBaseId) {
+        evictByPattern(KnowledgeBaseCacheKeys.detailPattern(enterpriseId, knowledgeBaseId));
+    }
+
+    /** 按通配 pattern 批量删缓存键；Redis 异常时只记 WARN 降级。 */
+    private void evictByPattern(String pattern) {
+        try {
+            Set<String> keys = redisTemplate.keys(pattern);
+            if (keys != null && !keys.isEmpty()) {
+                redisTemplate.delete(keys);
+            }
+        } catch (RuntimeException ex) {
+            log.warn("event=kb_cache_evict_failed pattern={} errorType={}",
+                    pattern, ex.getClass().getSimpleName());
+        }
     }
 
     /**

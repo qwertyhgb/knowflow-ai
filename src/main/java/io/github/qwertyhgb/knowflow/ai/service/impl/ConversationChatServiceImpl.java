@@ -6,6 +6,7 @@ import io.github.qwertyhgb.knowflow.ai.entity.Conversation;
 import io.github.qwertyhgb.knowflow.ai.enums.AiMessageRole;
 import io.github.qwertyhgb.knowflow.ai.mapper.AiMessageMapper;
 import io.github.qwertyhgb.knowflow.ai.mapper.ConversationMapper;
+import io.github.qwertyhgb.knowflow.ai.rate.RateLimitService;
 import io.github.qwertyhgb.knowflow.ai.service.ConversationChatService;
 import io.github.qwertyhgb.knowflow.ai.service.SemanticSearchService;
 import io.github.qwertyhgb.knowflow.ai.vo.ConversationChatVO;
@@ -103,24 +104,37 @@ public class ConversationChatServiceImpl implements ConversationChatService {
     private final SemanticSearchService semanticSearchService;
     private final JsonMapper jsonMapper;
     private final Clock clock;
+    private final RateLimitService rateLimitService;
 
     public ConversationChatServiceImpl(ConversationMapper conversationMapper,
                                        AiMessageMapper aiMessageMapper,
                                        ObjectProvider<ChatClient> chatClientProvider,
                                        SemanticSearchService semanticSearchService,
                                        JsonMapper jsonMapper,
-                                       Clock clock) {
+                                       Clock clock,
+                                       RateLimitService rateLimitService) {
         this.conversationMapper = conversationMapper;
         this.aiMessageMapper = aiMessageMapper;
         this.chatClientProvider = chatClientProvider;
         this.semanticSearchService = semanticSearchService;
         this.jsonMapper = jsonMapper;
         this.clock = clock;
+        this.rateLimitService = rateLimitService;
     }
 
     @Override
     @Transactional
     public ConversationChatVO chat(Long userId, Long conversationId, String message) {
+        // ---- 0. 限流：会话内对话同样调用付费 LLM，与无会话对话一视同仁 ----
+        // 动作标识统一走 "ai_conversation"：会话内对话（chat/ragChat/ragChatStream）
+        // 三种入口共用同一配额，防止用户「换个入口绕过限流」。
+        // 为什么放在最前面（归属校验之前）？限流是成本防线——超限直接拒绝，
+        // 避免先做数据库查询又白忙一场。
+        if (!rateLimitService.tryAcquire(userId, "ai_conversation")) {
+            log.warn("event=conversation_chat_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // ---- 1. 校验会话归属（非本人/不存在统一 404）----
         Conversation conversation = requireOwnedConversation(userId, conversationId);
 
@@ -226,6 +240,12 @@ public class ConversationChatServiceImpl implements ConversationChatService {
     @Override
     @Transactional
     public RagChatVO ragChat(Long userId, Long conversationId, String question, int topK, double scoreThreshold) {
+        // ---- 0. 限流：会话内 RAG 同样调用付费 LLM，与普通对话共用同一配额 ----
+        if (!rateLimitService.tryAcquire(userId, "ai_conversation")) {
+            log.warn("event=conversation_rag_chat_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // ---- 1. 校验会话归属（非本人/不存在统一 404）----
         Conversation conversation = requireOwnedConversation(userId, conversationId);
 
@@ -365,6 +385,14 @@ public class ConversationChatServiceImpl implements ConversationChatService {
     @Override
     @Transactional
     public void ragChatStream(Long userId, Long conversationId, String question, int topK, double scoreThreshold, SseEmitter emitter) {
+        // ---- 0. 限流：流式同样消耗 token（付费），共用 "ai_conversation" 配额 ----
+        // 关键：此处尚未开始推流、SSE 响应头未发出，抛出的 429 仍能由全局异常处理
+        // 转成正常 HTTP 状态码；一旦开始 send，就只能发 error 事件了（见下文注释）。
+        if (!rateLimitService.tryAcquire(userId, "ai_conversation")) {
+            log.warn("event=conversation_rag_chat_stream_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // ---- 1. 校验会话归属 ----
         Conversation conversation;
         try {

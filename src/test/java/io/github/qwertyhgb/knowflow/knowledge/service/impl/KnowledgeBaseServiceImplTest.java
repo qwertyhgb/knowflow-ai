@@ -27,6 +27,7 @@ import io.github.qwertyhgb.knowflow.knowledge.enums.KnowledgeBaseMemberRole;
 import io.github.qwertyhgb.knowflow.knowledge.enums.KnowledgeBaseStatus;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMapper;
 import io.github.qwertyhgb.knowflow.knowledge.mapper.KnowledgeBaseMemberMapper;
+import io.github.qwertyhgb.knowflow.knowledge.service.KnowledgeBaseCacheKeys;
 import io.github.qwertyhgb.knowflow.knowledge.vo.KnowledgeBaseMemberVO;
 import io.github.qwertyhgb.knowflow.knowledge.vo.KnowledgeBaseVO;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -37,11 +38,17 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -49,6 +56,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -73,6 +83,12 @@ class KnowledgeBaseServiceImplTest {
     @Mock
     private KnowledgeBaseMemberMapper knowledgeBaseMemberMapper;
 
+    @Mock
+    private StringRedisTemplate redisTemplate;
+
+    @Mock
+    private ValueOperations<String, String> valueOperations;
+
     private KnowledgeBaseServiceImpl knowledgeBaseService;
 
     @BeforeAll
@@ -90,13 +106,20 @@ class KnowledgeBaseServiceImplTest {
         // 保持既有 requireEnterprise / requireActiveMember 桩的语义不变。
         EnterpriseMembershipChecker membershipChecker =
                 new EnterpriseMembershipChecker(enterpriseMapper, enterpriseMemberMapper);
+        // lenient()：部分用例（如权限校验失败路径）不会走到缓存读写，setUp 的 opsForValue
+        // 桩若为严格模式会被判为 UnnecessaryStubbing；只对本桩放宽，保留其他桩的严格检查。
+        lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         knowledgeBaseService = new KnowledgeBaseServiceImpl(
                 knowledgeBaseMapper,
                 knowledgeBaseMemberMapper,
                 membershipChecker,
                 enterpriseMemberMapper,
                 enterpriseRoleMapper,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                redisTemplate,
+                // 缓存 JSON 序列化/反序列化用真实 JsonMapper（与 Service 注入的同一库），
+                // 保证「缓存回填 → 命中反序列化」在测试里走真实 JSON 链路。
+                new JsonMapper());
     }
 
     @Test
@@ -777,6 +800,219 @@ class KnowledgeBaseServiceImplTest {
         // 不应抛 403（企业级 OWNER 可管理企业内所有知识库）。
         assertEquals(100L, result.getId());
         verify(knowledgeBaseMapper).update(any(), any());
+    }
+
+    // ==================== Cache Aside 缓存（Phase 14） ====================
+    //
+    // 约定：企业 ID=10、用户 ID=7、知识库 ID=100（与上方既有用例一致）。
+    // 命中缓存键与 Service 实现使用同一常量类生成，键格式不在此硬编码。
+
+    @Test
+    void shouldReturnCachedListWithoutQueryingDatabase() throws Exception {
+        allowActiveMember();
+        // 预置缓存：把真实 VO 序列化为 JSON 存进 mock Redis。
+        KnowledgeBaseVO cached = KnowledgeBaseVO.from(knowledgeBase(100L, KnowledgeBaseAccessMode.PUBLIC),
+                KnowledgeBaseMemberRole.ADMIN);
+        String json = new JsonMapper().writeValueAsString(List.of(cached));
+        when(valueOperations.get(KnowledgeBaseCacheKeys.listKey(10L, 7L))).thenReturn(json);
+
+        List<KnowledgeBaseVO> result = knowledgeBaseService.listVisibleKnowledgeBases(7L, 10L);
+
+        assertEquals(1, result.size());
+        assertEquals(100L, result.get(0).getId());
+        assertEquals(KnowledgeBaseMemberRole.ADMIN, result.get(0).getMyRole(),
+                "缓存中的 myRole 应被原样还原");
+        // 命中缓存：知识库查询与成员查询都不该发生（Cache Aside 命中即回）。
+        verify(knowledgeBaseMapper, never()).selectList(any());
+        verify(knowledgeBaseMemberMapper, never()).selectList(any());
+    }
+
+    @Test
+    void shouldCacheEmptyListWithShortTtl() {
+        allowActiveMember();
+        when(knowledgeBaseMapper.selectList(any())).thenReturn(List.of());
+
+        List<KnowledgeBaseVO> result = knowledgeBaseService.listVisibleKnowledgeBases(7L, 10L);
+
+        assertTrue(result.isEmpty());
+        // 空结果也用短 TTL 缓存（防缓存穿透：空列表也是高频查询结果）。
+        ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(valueOperations).set(eq(KnowledgeBaseCacheKeys.listKey(10L, 7L)),
+                eq("[]"), ttlCaptor.capture());
+        assertEquals(Duration.ofSeconds(KnowledgeBaseCacheKeys.EMPTY_TTL_SECONDS),
+                ttlCaptor.getValue(), "空结果应使用短 TTL（缓存穿透防护）");
+    }
+
+    @Test
+    void shouldBackfillListWithJsonAndRandomJitterTtl() throws Exception {
+        allowActiveMember();
+        when(knowledgeBaseMapper.selectList(any()))
+                .thenReturn(List.of(knowledgeBase(100L, KnowledgeBaseAccessMode.PUBLIC)));
+        when(knowledgeBaseMemberMapper.selectList(any())).thenReturn(List.of());
+
+        List<KnowledgeBaseVO> result = knowledgeBaseService.listVisibleKnowledgeBases(7L, 10L);
+
+        assertEquals(1, result.size());
+        // 回填值必须是可反序列化的真实 JSON（证明「缓存 JSON 而非 Java 对象」）。
+        ArgumentCaptor<String> valueCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(valueOperations).set(eq(KnowledgeBaseCacheKeys.listKey(10L, 7L)),
+                valueCaptor.capture(), ttlCaptor.capture());
+        List<KnowledgeBaseVO> parsed = new JsonMapper().readValue(valueCaptor.getValue(),
+                new TypeReference<List<KnowledgeBaseVO>>() {
+                });
+        assertEquals(1, parsed.size());
+        assertEquals(100L, parsed.get(0).getId());
+        // TTL = 基础 + [0, 抖动)，必须落在 [300, 420) 秒区间（防雪崩的随机性）。
+        long ttlSeconds = ttlCaptor.getValue().toSeconds();
+        assertTrue(ttlSeconds >= KnowledgeBaseCacheKeys.LIST_TTL_SECONDS,
+                "TTL 不应小于基础值，实际 " + ttlSeconds + "s");
+        assertTrue(ttlSeconds < KnowledgeBaseCacheKeys.LIST_TTL_SECONDS
+                        + KnowledgeBaseCacheKeys.TTL_JITTER_SECONDS,
+                "TTL 不应超出基础值+抖动幅度，实际 " + ttlSeconds + "s");
+    }
+
+    @Test
+    void shouldDegradeToDatabaseWhenCacheReadFails() {
+        // 容错要点：Redis 读异常 → 降级为直接查数据库，查询照常返回（缓存只是加速）。
+        allowActiveMember();
+        when(valueOperations.get(anyString())).thenThrow(new RuntimeException("redis down"));
+        when(knowledgeBaseMapper.selectList(any()))
+                .thenReturn(List.of(knowledgeBase(100L, KnowledgeBaseAccessMode.PUBLIC)));
+        when(knowledgeBaseMemberMapper.selectList(any())).thenReturn(List.of());
+
+        List<KnowledgeBaseVO> result = knowledgeBaseService.listVisibleKnowledgeBases(7L, 10L);
+
+        assertEquals(1, result.size(), "Redis 故障时列表查询应降级为直接查数据库并正常返回");
+        verify(knowledgeBaseMapper).selectList(any());
+    }
+
+    @Test
+    void shouldReturnCachedDetailWithoutQueryingDatabase() throws Exception {
+        allowActiveMember();
+        KnowledgeBaseVO cached = KnowledgeBaseVO.from(knowledgeBase(100L, KnowledgeBaseAccessMode.PRIVATE),
+                KnowledgeBaseMemberRole.VIEWER);
+        String json = new JsonMapper().writeValueAsString(cached);
+        when(valueOperations.get(KnowledgeBaseCacheKeys.detailKey(10L, 100L, 7L))).thenReturn(json);
+
+        KnowledgeBaseVO result = knowledgeBaseService.getKnowledgeBase(7L, 10L, 100L);
+
+        assertEquals(100L, result.getId());
+        assertEquals(KnowledgeBaseMemberRole.VIEWER, result.getMyRole());
+        verify(knowledgeBaseMapper, never()).selectOne(any());
+        verify(knowledgeBaseMemberMapper, never()).selectOne(any());
+    }
+
+    @Test
+    void shouldReturnNotFoundFromCachedNullMarkerWithoutQueryingDatabase() {
+        allowActiveMember();
+        // 上次查询「不存在/无权限」留下的空值标记：命中后直接 404，不再打数据库（防穿透闭环）。
+        when(valueOperations.get(KnowledgeBaseCacheKeys.detailKey(10L, 100L, 7L))).thenReturn("NULL");
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> knowledgeBaseService.getKnowledgeBase(7L, 10L, 100L));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        verify(knowledgeBaseMapper, never()).selectOne(any());
+    }
+
+    @Test
+    void shouldCacheNullMarkerWhenDetailNotExists() {
+        allowActiveMember();
+        when(knowledgeBaseMapper.selectOne(any())).thenReturn(null);
+
+        assertThrows(BusinessException.class,
+                () -> knowledgeBaseService.getKnowledgeBase(7L, 10L, 100L));
+
+        // 404 前回填空值标记（短 TTL）——缓存穿透防护：不存在的 ID 下次不再打数据库。
+        ArgumentCaptor<Duration> ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(valueOperations).set(eq(KnowledgeBaseCacheKeys.detailKey(10L, 100L, 7L)),
+                eq("NULL"), ttlCaptor.capture());
+        assertEquals(Duration.ofSeconds(KnowledgeBaseCacheKeys.EMPTY_TTL_SECONDS),
+                ttlCaptor.getValue(), "空值标记应使用短 TTL");
+    }
+
+    // ---- 写路径：缓存失效（删除列表/详情缓存键） ----
+
+    @Test
+    void shouldEvictListCachesAfterCreate() {
+        allowActiveMember();
+        when(knowledgeBaseMapper.insert(any(KnowledgeBase.class))).thenAnswer(invocation -> {
+            invocation.<KnowledgeBase>getArgument(0).setId(500L);
+            return 1;
+        });
+        when(redisTemplate.keys(KnowledgeBaseCacheKeys.listPattern(10L))).thenReturn(Set.of("list-key"));
+
+        knowledgeBaseService.createKnowledgeBase(7L, 10L,
+                request("新库", null, KnowledgeBaseAccessMode.PUBLIC));
+
+        // 新库会影响列表展示：按企业通配 pattern 匹配整组列表缓存键并删除。
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.listPattern(10L));
+        verify(redisTemplate).delete(Set.of("list-key"));
+    }
+
+    @Test
+    void shouldEvictListAndDetailCachesAfterUpdate() {
+        allowResourceAdmin();
+        when(knowledgeBaseMapper.update(any(), any(Wrapper.class))).thenReturn(1);
+        when(redisTemplate.keys(anyString())).thenReturn(Set.of("cache-key"));
+
+        knowledgeBaseService.updateKnowledgeBase(7L, 10L, 100L,
+                updateRequest("平台手册", null, KnowledgeBaseAccessMode.PUBLIC));
+
+        // 改名/改 accessMode：列表显示与详情内容都变化，两个 pattern 都要失效。
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.listPattern(10L));
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.detailPattern(10L, 100L));
+        verify(redisTemplate, org.mockito.Mockito.times(2)).delete(Set.of("cache-key"));
+    }
+
+    @Test
+    void shouldEvictCachesAfterDelete() {
+        allowResourceAdmin();
+        when(knowledgeBaseMemberMapper.delete(any())).thenReturn(1);
+        when(knowledgeBaseMapper.delete(any())).thenReturn(1);
+        when(redisTemplate.keys(anyString())).thenReturn(Set.of("cache-key"));
+
+        knowledgeBaseService.deleteKnowledgeBase(7L, 10L, 100L);
+
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.listPattern(10L));
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.detailPattern(10L, 100L));
+        verify(redisTemplate, org.mockito.Mockito.times(2)).delete(Set.of("cache-key"));
+    }
+
+    @Test
+    void shouldEvictCachesAfterStatusChange() {
+        allowResourceAdmin();
+        when(knowledgeBaseMapper.update(any(), any(Wrapper.class))).thenReturn(1);
+        when(redisTemplate.keys(anyString())).thenReturn(Set.of("cache-key"));
+
+        knowledgeBaseService.updateKnowledgeBaseStatus(7L, 10L, 100L,
+                statusRequest(KnowledgeBaseStatus.DISABLED));
+
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.listPattern(10L));
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.detailPattern(10L, 100L));
+        verify(redisTemplate, org.mockito.Mockito.times(2)).delete(Set.of("cache-key"));
+    }
+
+    @Test
+    void shouldEvictCachesAfterMemberAdd() {
+        allowResourceAdmin();
+        // exists 序列：第 1 次资源级 ADMIN 校验（true）、第 2 次目标成员查重（false）。
+        when(knowledgeBaseMemberMapper.exists(any())).thenReturn(true, false);
+        when(knowledgeBaseMemberMapper.insert(any(KnowledgeBaseMember.class))).thenAnswer(invocation -> {
+            invocation.<KnowledgeBaseMember>getArgument(0).setId(300L);
+            return 1;
+        });
+        when(redisTemplate.keys(anyString())).thenReturn(Set.of("cache-key"));
+
+        knowledgeBaseService.addKnowledgeBaseMember(7L, 10L, 100L,
+                addRequest(8L, KnowledgeBaseMemberRole.EDITOR));
+
+        // 成员变化影响多个用户可见性与 myRole：列表 + 详情缓存整组失效
+        // （改角色/移除成员走同一失效路径，此处以新增为代表）。
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.listPattern(10L));
+        verify(redisTemplate).keys(KnowledgeBaseCacheKeys.detailPattern(10L, 100L));
+        verify(redisTemplate, org.mockito.Mockito.times(2)).delete(Set.of("cache-key"));
     }
 
     // ==================== 辅助方法 ====================

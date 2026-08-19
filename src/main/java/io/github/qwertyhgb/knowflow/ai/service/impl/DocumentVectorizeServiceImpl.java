@@ -12,8 +12,10 @@ import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -22,9 +24,16 @@ import java.util.Map;
 /**
  * 文档向量化服务实现。
  *
- * <p>核心链路：<strong>查文档 → 校验 → 删除旧向量（幂等）→ 切块 → 组装块 → 写入 ES</strong>。
+ * <p>核心链路：<strong>分布式锁 → 查文档 → 校验 → 删除旧向量（幂等）→ 切块 → 组装块
+ * → 写入 ES</strong>。
  * 这是 Phase 10 的第一步：把文档内容转成语义向量落库，Phase 11 才能基于它做
  * RAG 语义检索。本步只做「数据入库」，检索在下一步。</p>
+ *
+ * <p><strong>为什么入口要加分布式锁？</strong>「检查-执行」链路（删旧向量→切块→
+ * embedding→写入）不是原子的：并发请求可能同时读到「未向量化」并重复执行，
+ * 等于重复调用付费 embedding API（真金白银的浪费）。用 Redis {@code SET NX EX}
+ * 做最小分布式锁：同一文档只有一个请求能拿到锁执行，其余请求收到 409
+ * {@link ErrorCode#VECTORIZE_IN_PROGRESS}。详见 {@link #vectorize(Long)} 内的注释。</p>
  *
  * <p><strong>为什么切块（Chunking）？</strong>三个理由：</p>
  * <ol>
@@ -81,6 +90,25 @@ public class DocumentVectorizeServiceImpl implements DocumentVectorizeService {
     private final DocumentMapper documentMapper;
 
     /**
+     * 分布式锁键前缀：锁键形如 {@code knowflow:lock:vectorize:{documentId}}。
+     * 同一文档的并发向量化请求争抢同一个 key——只有一个能 SET NX 成功，其余被拒，
+     * 防止「检查-执行」之间产生竞态，导致同一文档被并发重复向量化（重复调用付费 embedding）。
+     */
+    private static final String LOCK_KEY_PREFIX = "knowflow:lock:vectorize:";
+
+    /**
+     * 锁超时时间（秒）：持锁方崩溃后锁自动过期，不会永远卡死后续请求。
+     * 30 秒远大于向量化的实际耗时（秒级），教学阶段够用。
+     */
+    private static final long LOCK_TTL_SECONDS = 30;
+
+    /**
+     * Redis 模板：用于实现分布式锁。与 TokenService/RateLimitService 共用
+     * 同一个 {@link StringRedisTemplate} Bean，值是字符串（锁值统一用 "1"）。
+     */
+    private final StringRedisTemplate redisTemplate;
+
+    /**
      * Embedding 模型的「可选」提供者：未配置 SILICONFLOW_API_KEY 时 EmbeddingModel
      * Bean 不存在，用 ObjectProvider.getIfAvailable() 判空后返回 503，而不是启动失败
      * （与 AiChatServiceImpl 对 ChatClient 的处理一致，AI 能力是可选的）。
@@ -94,81 +122,135 @@ public class DocumentVectorizeServiceImpl implements DocumentVectorizeService {
     private final ObjectProvider<VectorStore> vectorStoreProvider;
 
     public DocumentVectorizeServiceImpl(DocumentMapper documentMapper,
+                                        StringRedisTemplate redisTemplate,
                                         ObjectProvider<EmbeddingModel> embeddingModelProvider,
                                         ObjectProvider<VectorStore> vectorStoreProvider) {
         this.documentMapper = documentMapper;
+        this.redisTemplate = redisTemplate;
         this.embeddingModelProvider = embeddingModelProvider;
         this.vectorStoreProvider = vectorStoreProvider;
     }
 
     @Override
     public DocumentVectorizeVO vectorize(Long documentId) {
-        // ---- 1. 查文档 ----
-        Document document = documentMapper.selectById(documentId);
-        if (document == null) {
-            log.warn("event=document_vectorize_failed reason=document_not_found documentId={}", documentId);
-            throw new BusinessException(ErrorCode.DOCUMENT_NOT_FOUND);
-        }
-
-        // ---- 2. 校验状态：只有 READY 且内容非空才能向量化 ----
-        if (document.getStatus() != DocumentStatus.READY || isBlank(document.getContent())) {
-            log.warn("event=document_vectorize_failed reason=document_not_ready documentId={} status={}",
-                    documentId, document.getStatus());
-            throw new BusinessException(ErrorCode.DOCUMENT_NOT_READY);
-        }
-
-        // ---- 3. 检查 embedding / 向量存储是否可用 ----
-        EmbeddingModel embeddingModel = embeddingModelProvider.getIfAvailable();
-        VectorStore vectorStore = vectorStoreProvider.getIfAvailable();
-        if (embeddingModel == null || vectorStore == null) {
-            log.warn("event=document_vectorize_failed reason=embedding_unavailable documentId={}", documentId);
-            throw new BusinessException(ErrorCode.AI_SERVICE_UNAVAILABLE);
-        }
-
+        // ==================== 分布式锁（核心新增） ====================
+        // 【为什么向量化需要锁？】「检查-执行」链路（删旧向量→切块→embedding→写入）不是
+        // 原子的：多实例部署时可能有两个请求同时读到「未向量化」状态，于是并发地重复调用
+        // 付费 embedding API——真实白花钱。
+        // 【为什么单机教学阶段也要锁？】embedding 是真实付费调用，并发重复就是真实浪费；
+        // 而且多实例部署时锁是必要基础设施，现在学的是同一套模式，之后只换部署方式。
+        // 【Redis SET NX EX 为什么是分布式锁的最小实现？】SET NX（Not eXists）= 只有 key
+        // 不存在时才写入——只有一个客户端能成功（拿锁），其余失败（拿不到锁）；
+        // EX（过期）= 持锁方崩溃时锁自动过期，不会把后来的请求永久挡死。
+        String lockKey = LOCK_KEY_PREFIX + documentId;
+        boolean locked = false;
         try {
-            // ---- 4. 幂等：先删除该文档的旧向量 ----
-            // 重复向量化（如修改文档后重跑）不应堆积重复块：先按 documentId 过滤删除旧向量，
-            // 再写新的。FilterExpressionBuilder 构造 metadata 过滤表达式
-            // （documentId == {id}），ES 向量存储会把 metadata 字段索引为普通字段供过滤。
-            FilterExpressionBuilder filterBuilder = new FilterExpressionBuilder();
-            vectorStore.delete(filterBuilder.eq("documentId", documentId).build());
-
-            // ---- 5. 切块 ----
-            List<String> chunks = splitIntoChunks(document.getContent());
-
-            // ---- 6. 组装 Spring AI Document（文本 + 元数据）----
-            List<org.springframework.ai.document.Document> aiDocuments = new ArrayList<>(chunks.size());
-            for (int i = 0; i < chunks.size(); i++) {
-                // 块 ID 用「文档ID-块序号」：保证同一文档的块可识别、可追溯，
-                // 后续按文档 ID 过滤/删除某文档的全部块。
-                String chunkId = documentId + "-" + i;
-                // metadata 冗余文档归属信息：检索结果命中后能反查来源文档，
-                // 权限过滤（Phase 11）也能按 knowledgeBaseId 做可见性裁剪。
-                Map<String, Object> metadata = new HashMap<>();
-                metadata.put("documentId", documentId);
-                metadata.put("knowledgeBaseId", document.getKnowledgeBaseId());
-                metadata.put("fileName", document.getFileName());
-                metadata.put("chunkIndex", i);
-
-                aiDocuments.add(new org.springframework.ai.document.Document(chunkId, chunks.get(i), metadata));
+            // ---- 0. 尝试拿锁 ----
+            try {
+                // setIfAbsent(key, value, ttl) 就是「SET key value NX EX 秒」的原子封装：
+                // 返回 true = 这个 key 之前不存在、本线程抢锁成功。
+                Boolean acquired = redisTemplate.opsForValue()
+                        .setIfAbsent(lockKey, "1", Duration.ofSeconds(LOCK_TTL_SECONDS));
+                if (!Boolean.TRUE.equals(acquired)) {
+                    // 没拿到锁：另一个请求正在向量化同一文档（或 TTL 未过期）。
+                    // 明确告知「正在处理」比静默等待/重复执行好——付费 API 不重复调。
+                    log.warn("event=document_vectorize_in_progress documentId={}", documentId);
+                    throw new BusinessException(ErrorCode.VECTORIZE_IN_PROGRESS);
+                }
+                locked = true;
+            } catch (BusinessException e) {
+                // VECTORIZE_IN_PROGRESS 是明确业务冲突（Redis 连通且返回了「已有人持锁」），
+                // 必须原样抛出，不能被下面的降级分支吞掉。
+                throw e;
+            } catch (RuntimeException e) {
+                // Redis 故障（连接失败/超时等）时无法判断锁状态：宁可放行继续向量化，
+                // 也不让 Redis 故障阻塞业务（与限流降级同一哲学：Redis 是增强不是正确性依赖）。
+                // 代价是极端情况下可能并发重复调用 embedding——Redis 正常时不会发生。
+                log.warn("event=document_vectorize_lock_failed documentId={} errorType={}",
+                        documentId, e.getClass().getSimpleName());
             }
 
-            // ---- 7. 写入 ES 向量索引 ----
-            // 向量化在 VectorStore.add 内部完成：它调用 embeddingModel 为每个 Document
-            // 计算向量（语义相近文本向量距离近，余弦相似度是向量检索的度量），
-            // 再连同文本与 metadata 一起批量写入 ES 的 dense_vector 字段。
-            vectorStore.add(aiDocuments);
+            // ---- 1. 查文档 ----
+            Document document = documentMapper.selectById(documentId);
+            if (document == null) {
+                log.warn("event=document_vectorize_failed reason=document_not_found documentId={}", documentId);
+                throw new BusinessException(ErrorCode.DOCUMENT_NOT_FOUND);
+            }
 
-            int vectorSize = embeddingModel.dimensions();
-            log.info("event=document_vectorized documentId={} chunkCount={} vectorSize={}",
-                    documentId, chunks.size(), vectorSize);
-            return DocumentVectorizeVO.of(documentId, chunks.size(), vectorSize);
-        } catch (RuntimeException e) {
-            // 外部依赖（embedding 服务 / ES）调用失败：记录安全日志（不含文档内容原文），
-            // 转成 503 结构化错误，与 AI 对话的失败处理语义一致。
-            log.warn("event=document_vectorize_failed reason={} documentId={}",
-                    e.getClass().getSimpleName(), documentId);
-            throw new BusinessException(ErrorCode.AI_SERVICE_UNAVAILABLE, e.getMessage());
+            // ---- 2. 校验状态：只有 READY 且内容非空才能向量化 ----
+            if (document.getStatus() != DocumentStatus.READY || isBlank(document.getContent())) {
+                log.warn("event=document_vectorize_failed reason=document_not_ready documentId={} status={}",
+                        documentId, document.getStatus());
+                throw new BusinessException(ErrorCode.DOCUMENT_NOT_READY);
+            }
+
+            // ---- 3. 检查 embedding / 向量存储是否可用 ----
+            EmbeddingModel embeddingModel = embeddingModelProvider.getIfAvailable();
+            VectorStore vectorStore = vectorStoreProvider.getIfAvailable();
+            if (embeddingModel == null || vectorStore == null) {
+                log.warn("event=document_vectorize_failed reason=embedding_unavailable documentId={}", documentId);
+                throw new BusinessException(ErrorCode.AI_SERVICE_UNAVAILABLE);
+            }
+
+            try {
+                // ---- 4. 幂等：先删除该文档的旧向量 ----
+                // 重复向量化（如修改文档后重跑）不应堆积重复块：先按 documentId 过滤删除旧向量，
+                // 再写新的。FilterExpressionBuilder 构造 metadata 过滤表达式
+                // （documentId == {id}），ES 向量存储会把 metadata 字段索引为普通字段供过滤。
+                FilterExpressionBuilder filterBuilder = new FilterExpressionBuilder();
+                vectorStore.delete(filterBuilder.eq("documentId", documentId).build());
+
+                // ---- 5. 切块 ----
+                List<String> chunks = splitIntoChunks(document.getContent());
+
+                // ---- 6. 组装 Spring AI Document（文本 + 元数据）----
+                List<org.springframework.ai.document.Document> aiDocuments = new ArrayList<>(chunks.size());
+                for (int i = 0; i < chunks.size(); i++) {
+                    // 块 ID 用「文档ID-块序号」：保证同一文档的块可识别、可追溯，
+                    // 后续按文档 ID 过滤/删除某文档的全部块。
+                    String chunkId = documentId + "-" + i;
+                    // metadata 冗余文档归属信息：检索结果命中后能反查来源文档，
+                    // 权限过滤（Phase 11）也能按 knowledgeBaseId 做可见性裁剪。
+                    Map<String, Object> metadata = new HashMap<>();
+                    metadata.put("documentId", documentId);
+                    metadata.put("knowledgeBaseId", document.getKnowledgeBaseId());
+                    metadata.put("fileName", document.getFileName());
+                    metadata.put("chunkIndex", i);
+
+                    aiDocuments.add(new org.springframework.ai.document.Document(chunkId, chunks.get(i), metadata));
+                }
+
+                // ---- 7. 写入 ES 向量索引 ----
+                // 向量化在 VectorStore.add 内部完成：它调用 embeddingModel 为每个 Document
+                // 计算向量（语义相近文本向量距离近，余弦相似度是向量检索的度量），
+                // 再连同文本与 metadata 一起批量写入 ES 的 dense_vector 字段。
+                vectorStore.add(aiDocuments);
+
+                int vectorSize = embeddingModel.dimensions();
+                log.info("event=document_vectorized documentId={} chunkCount={} vectorSize={}",
+                        documentId, chunks.size(), vectorSize);
+                return DocumentVectorizeVO.of(documentId, chunks.size(), vectorSize);
+            } catch (RuntimeException e) {
+                // 外部依赖（embedding 服务 / ES）调用失败：记录安全日志（不含文档内容原文），
+                // 转成 503 结构化错误，与 AI 对话的失败处理语义一致。
+                log.warn("event=document_vectorize_failed reason={} documentId={}",
+                        e.getClass().getSimpleName(), documentId);
+                throw new BusinessException(ErrorCode.AI_SERVICE_UNAVAILABLE, e.getMessage());
+            }
+        } finally {
+            // ---- 释放锁 ----
+            // 【为什么用 finally？】无论向量化成功、抛业务异常还是崩溃，finally 都保证执行
+            // 解锁——否则只释放「成功路径」的锁，异常路径会锁泄漏，后续请求全部 409。
+            if (locked) {
+                try {
+                    redisTemplate.delete(lockKey);
+                } catch (RuntimeException e) {
+                    // 解锁失败由 TTL 兜底（30 秒后锁自动过期），不必让业务因此失败。
+                    // 日志只记文档 ID 与异常类型（白名单）。
+                    log.warn("event=document_vectorize_unlock_failed documentId={} errorType={}",
+                            documentId, e.getClass().getSimpleName());
+                }
+            }
         }
     }
 

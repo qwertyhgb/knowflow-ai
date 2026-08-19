@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -82,7 +83,7 @@ class RagChatControllerTest {
     @Test
     void shouldReturnReplyWithCitationsForValidRequest() throws Exception {
         when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
-        when(ragChatService.chat("如何提升系统查询速度", 5, 0.3)).thenReturn(RagChatVO.of(
+        when(ragChatService.chat(anyLong(), anyString(), anyInt(), anyDouble())).thenReturn(RagChatVO.of(
                 "根据资料[1]，Redis 缓存能显著降低数据库查询压力。",
                 List.of(RagCitationVO.of(1L, 2L, "缓存设计.md", 0,
                         "Redis 缓存可以显著降低数据库查询压力", 0.8))));
@@ -200,7 +201,9 @@ class RagChatControllerTest {
         // 模拟真实的流式回调。若在 Controller 方法内同步完成，会破坏 Security 异步上下文传播
         // 导致 asyncDispatch 403（Phase 9 已验证：后台线程异步是正确做法）。
         doAnswer(invocation -> {
-            SseEmitter emitter = invocation.getArgument(3);
+            // chatStream(Long userId, String question, int topK, double threshold, SseEmitter emitter)
+            // —— emitter 是第 5 个参数
+            SseEmitter emitter = invocation.getArgument(4);
             Thread thread = new Thread(() -> {
                 try {
                     emitter.send(SseEmitter.event().name("citations").data("[{\"documentId\":1}]"));
@@ -213,7 +216,7 @@ class RagChatControllerTest {
             });
             thread.start();
             return null;
-        }).when(ragChatService).chatStream(anyString(), anyInt(), anyDouble(), any(SseEmitter.class));
+        }).when(ragChatService).chatStream(anyLong(), anyString(), anyInt(), anyDouble(), any(SseEmitter.class));
 
         // SseEmitter 是异步返回值：perform 先进入异步处理（asyncStarted），
         // 再用 asyncDispatch 拿到最终写出的 SSE 响应体。

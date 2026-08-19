@@ -1,5 +1,12 @@
 # 本地开发基础设施编排（Docker Compose）。
 #
+# 【项目名统一说明（2026-08-19）】
+# 历史遗留：mysql/redis 容器曾用项目名 knowflow 创建，rabbitmq/elasticsearch 曾用
+# 默认项目名 knowflow-ai 创建，导致 docker compose 出现两个项目、卷也分了两套。
+# 本文件顶层 name: knowflow 固定项目名，并声明 rabbitmq/es 的数据卷为 external
+# 复用旧卷（knowflow-ai_knowflow-*），保证统一项目名后数据（ES 索引、MQ 元数据）
+# 不丢失。external 卷 compose 永不自动删除，删除需手动 docker volume rm。
+#
 # 为什么 RabbitMQ 而非 Kafka（Phase 7 引入 MQ 的技术选型）：
 #   - RabbitMQ 的模型（Exchange / Queue / Routing Key / Binding）概念少、上手快，
 #     适合当前学习阶段理解「生产-交换机-队列-消费」的完整链路；
@@ -36,6 +43,8 @@
 #     docker rm knowflow-rabbitmq
 #     docker compose up -d rabbitmq
 #     docker compose ps   # 等待 rabbitmq 显示 healthy
+
+name: knowflow
 
 services:
   mysql:
@@ -122,5 +131,12 @@ services:
 
 volumes:
   knowflow-mysql-data:
+  # 【external 卷说明】这两个卷在 2026-08-19 之前由「knowflow-ai」项目创建，
+  # 数据（ES 索引、RabbitMQ 元数据）都在里面。声明为 external 并显式指定旧卷名，
+  # 让统一项目名后的新容器直接复用旧数据；external 卷不会随 compose down 删除。
   knowflow-rabbitmq-data:
+    external: true
+    name: knowflow-ai_knowflow-rabbitmq-data
   knowflow-es-data:
+    external: true
+    name: knowflow-ai_knowflow-es-data

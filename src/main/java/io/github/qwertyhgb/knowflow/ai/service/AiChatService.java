@@ -13,10 +13,11 @@ public interface AiChatService {
     /**
      * 发送单轮对话，调用大模型并返回回答文本。
      *
+     * @param userId  当前登录用户 ID：AI 调用是付费外部依赖，限流必须按用户维度
      * @param message 用户消息（已由 DTO 校验非空且长度 ≤2000）
      * @return 模型生成的回答文本
      */
-    String chat(String message);
+    String chat(Long userId, String message);
 
     /**
      * 流式对话：把模型逐块生成的回答通过 SSE 推送给客户端，实现「打字机」效果。
@@ -28,8 +29,9 @@ public interface AiChatService {
      * 我们在 Service 里「消费」Flux，再把每个分片手动转发到 SseEmitter——
      * 「内部用 Flux 承载流、对外用 SseEmitter 承载 SSE」是两个不冲突的概念。</p>
      *
+     * @param userId  当前登录用户 ID：流式同样消耗 token，必须与同步接口一起限流
      * @param message 用户消息（已由 DTO 校验非空且长度 ≤2000）
      * @param emitter 由 Controller 创建并返回给框架的 SSE 发射器，本方法向其推送分片
      */
-    void chatStream(String message, SseEmitter emitter);
+    void chatStream(Long userId, String message, SseEmitter emitter);
 }

@@ -16,12 +16,18 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -57,12 +63,22 @@ class DocumentVectorizeServiceImplTest {
     @Mock
     private VectorStore vectorStore;
 
+    /** Redis 模板 mock：用于桩分布式锁（SET NX EX / DEL）。 */
+    @Mock
+    private StringRedisTemplate redisTemplate;
+
+    @Mock
+    private ValueOperations<String, String> valueOperations;
+
     private DocumentVectorizeService vectorizeService;
 
     @BeforeEach
     void setUp() {
         vectorizeService = new DocumentVectorizeServiceImpl(
-                documentMapper, embeddingModelProvider, vectorStoreProvider);
+                documentMapper, redisTemplate, embeddingModelProvider, vectorStoreProvider);
+        // 默认让「拿锁」成功：既有用例聚焦向量化业务逻辑，锁的独占用例单独桩返回 false。
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
     }
 
     @Test
@@ -198,5 +214,90 @@ class DocumentVectorizeServiceImplTest {
         document.setStatus(DocumentStatus.READY);
         document.setContent(content);
         return document;
+    }
+
+    // ==================== 分布式锁测试 ====================
+
+    @Test
+    void shouldAcquireLockWithSetNxExAndReleaseOnSuccess() {
+        // 场景：正常向量化——SET NX EX 拿锁 → 处理 → finally 释放锁。
+        // 【为什么断言锁键与过期时间？】键（knowflow:lock:vectorize:1）决定「锁的对象」，
+        // 30 秒过期决定「持锁方崩溃后锁多久自动消失」——这两个参数错了锁就失效。
+        Document document = readyDocument("A".repeat(500));
+        when(documentMapper.selectById(1L)).thenReturn(document);
+        when(embeddingModelProvider.getIfAvailable()).thenReturn(embeddingModel);
+        when(vectorStoreProvider.getIfAvailable()).thenReturn(vectorStore);
+        when(embeddingModel.dimensions()).thenReturn(1024);
+
+        vectorizeService.vectorize(1L);
+
+        // 加锁：key/value/TTL 必须精确匹配实现（SET key "1" NX EX 30）
+        verify(valueOperations).setIfAbsent("knowflow:lock:vectorize:1", "1", Duration.ofSeconds(30));
+        // 释放锁：向量化结束后锁键必须被删除（不然下一个请求永远 409）
+        verify(redisTemplate).delete("knowflow:lock:vectorize:1");
+    }
+
+    @Test
+    void shouldThrowVectorizeInProgressWhenLockHeld() {
+        // 场景：同一文档正在被另一个请求向量化（锁已存在）→ setIfAbsent 返回 false → 409。
+        // 【为什么是 409 而非等待？】明确告知「正在处理」比静默等待/重复执行友好——
+        // 并发拿锁失败的请求如果自己再执行一遍，等于重复调用付费 embedding（浪费）。
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent("knowflow:lock:vectorize:1", "1", Duration.ofSeconds(30)))
+                .thenReturn(false);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> vectorizeService.vectorize(1L));
+
+        assertEquals(ErrorCode.VECTORIZE_IN_PROGRESS, exception.getErrorCode());
+        // 拿不到锁时不做任何业务操作（不查文档、不写向量）
+        verify(documentMapper, never()).selectById(any(Long.class));
+        verify(vectorStore, never()).add(anyList());
+        // 拿不到锁就不该释放别人的锁
+        verify(redisTemplate, never()).delete(anyString());
+    }
+
+    @Test
+    void shouldReleaseLockWhenVectorizeFails() {
+        // 场景：向量化过程中抛异常（如 ES 写入失败）→ 转 503，但 finally 必须释放锁。
+        // 【为什么异常路径也要解锁？】只释放成功路径的锁会导致锁泄漏：本请求抛异常退出，
+        // 锁却还在，后续所有请求都会永久 409——锁的生命周期必须与方法同生共死（finally 保证）。
+        Document document = readyDocument("内容");
+        when(documentMapper.selectById(1L)).thenReturn(document);
+        when(embeddingModelProvider.getIfAvailable()).thenReturn(embeddingModel);
+        when(vectorStoreProvider.getIfAvailable()).thenReturn(vectorStore);
+        // vectorStore.add 是 void 方法，Mockito 对 void 方法要用 doThrow().when() 桩异常
+        // （不能在 when() 里直接调用 void 方法）。模拟「向量化中途失败」，走 finally 解锁分支。
+        doThrow(new RuntimeException("es write failed")).when(vectorStore).add(anyList());
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> vectorizeService.vectorize(1L));
+
+        assertEquals(ErrorCode.AI_SERVICE_UNAVAILABLE, exception.getErrorCode());
+        // 即便失败，finally 也要删锁（下个请求才能拿到锁重试）
+        verify(redisTemplate).delete("knowflow:lock:vectorize:1");
+    }
+
+    @Test
+    void shouldDeGradeWhenRedisUnavailable() {
+        // 场景：Redis 故障（setIfAbsent 抛异常）→ 放行继续向量化。
+        // 【为什么 Redis 故障要放行？】锁是「防重复」的保护手段，不是正确性依赖——
+        // Redis 挂了宁可短暂失去互斥（极端情况才并发重复调用 embedding），
+        // 也不让文档向量化对用户整体不可用（与限流降级同一哲学）。
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent("knowflow:lock:vectorize:1", "1", Duration.ofSeconds(30)))
+                .thenThrow(new RuntimeException("connection refused"));
+
+        Document document = readyDocument("内容");
+        when(documentMapper.selectById(1L)).thenReturn(document);
+        when(embeddingModelProvider.getIfAvailable()).thenReturn(embeddingModel);
+        when(vectorStoreProvider.getIfAvailable()).thenReturn(vectorStore);
+
+        DocumentVectorizeVO vo = vectorizeService.vectorize(1L);
+
+        // 降级路径仍正常完成向量化（处理成功）
+        assertEquals(1L, vo.getDocumentId());
+        // Redis 故障时 locked=false，finally 不应尝试 delete（delete 也会失败）
+        verify(redisTemplate, never()).delete(anyString());
     }
 }

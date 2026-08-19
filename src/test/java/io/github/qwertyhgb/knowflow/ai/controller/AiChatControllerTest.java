@@ -19,6 +19,7 @@ import java.util.Optional;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -76,7 +77,7 @@ class AiChatControllerTest {
     @Test
     void shouldReturnReplyForValidMessageWhenLoggedIn() throws Exception {
         when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
-        when(aiChatService.chat("你好")).thenReturn("你好！我是 KnowFlow 智能助手。");
+        when(aiChatService.chat(anyLong(), anyString())).thenReturn("你好！我是 KnowFlow 智能助手。");
 
         mockMvc.perform(post("/api/ai/chat")
                         .header("Authorization", AUTH_HEADER)
@@ -128,7 +129,7 @@ class AiChatControllerTest {
     void shouldReturnServiceUnavailableWhenAiCallThrowsBusinessException() throws Exception {
         when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
         // Service 抛 AI 服务不可用的业务异常（大模型调用失败的语义）
-        when(aiChatService.chat(anyString()))
+        when(aiChatService.chat(anyLong(), anyString()))
                 .thenThrow(new io.github.qwertyhgb.knowflow.common.exception.BusinessException(
                         io.github.qwertyhgb.knowflow.common.exception.ErrorCode.AI_SERVICE_UNAVAILABLE));
 
@@ -151,7 +152,8 @@ class AiChatControllerTest {
         // 若在 Controller 方法内同步 send + complete，SseEmitter 会在异步处理启动前就完成，
         // 破坏 Spring Security 的 WebAsyncManager 集成对认证上下文的传播，导致 asyncDispatch 403。
         doAnswer(invocation -> {
-            SseEmitter emitter = invocation.getArgument(1);
+            // chatStream(Long userId, String message, SseEmitter emitter) —— emitter 是第 3 个参数
+            SseEmitter emitter = invocation.getArgument(2);
             Thread thread = new Thread(() -> {
                 try {
                     emitter.send(SseEmitter.event().data("你"));
@@ -163,7 +165,7 @@ class AiChatControllerTest {
             });
             thread.start();
             return null;
-        }).when(aiChatService).chatStream(anyString(), any(SseEmitter.class));
+        }).when(aiChatService).chatStream(anyLong(), anyString(), any(SseEmitter.class));
 
         // SseEmitter 是异步返回值：perform 会先进入异步处理（asyncStarted），
         // 必须再用 asyncDispatch 拿到最终写出的 SSE 响应体。
@@ -218,5 +220,25 @@ class AiChatControllerTest {
                 .andExpect(jsonPath("$.code").value("INVALID_PARAMETER"));
 
         verifyNoInteractions(aiChatService);
+    }
+
+    @Test
+    void shouldReturnTooManyRequestsWhenRateLimited() throws Exception {
+        when(tokenService.resolveUserId("valid-token")).thenReturn(Optional.of(1L));
+        // Service 抛限流业务异常（用户某时间窗口内调用超过 20 次）
+        when(aiChatService.chat(anyLong(), anyString()))
+                .thenThrow(new io.github.qwertyhgb.knowflow.common.exception.BusinessException(
+                        io.github.qwertyhgb.knowflow.common.exception.ErrorCode.RATE_LIMITED));
+
+        mockMvc.perform(post("/api/ai/chat")
+                        .header("Authorization", AUTH_HEADER)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                { "message": "你好" }
+                                """))
+                // 429 Too Many Requests：客户端触发频率限制，前端可提示「操作太频繁」并引导稍后重试
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.code").value("RATE_LIMITED"))
+                .andExpect(jsonPath("$.message").value("请求过于频繁,请稍后再试"));
     }
 }

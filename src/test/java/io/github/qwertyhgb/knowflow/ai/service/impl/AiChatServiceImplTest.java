@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.ai.service.impl;
 
+import io.github.qwertyhgb.knowflow.ai.rate.RateLimitService;
 import io.github.qwertyhgb.knowflow.common.exception.BusinessException;
 import io.github.qwertyhgb.knowflow.common.exception.ErrorCode;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
@@ -62,11 +64,17 @@ class AiChatServiceImplTest {
     @Mock
     private ChatClient.StreamResponseSpec streamResponseSpec;
 
+    /** 用户维限流服务 mock：既有用例默认放行，限流触发由专用用例覆盖。 */
+    @Mock
+    private RateLimitService rateLimitService;
+
     private AiChatServiceImpl chatService;
 
     @BeforeEach
     void setUp() {
-        chatService = new AiChatServiceImpl(chatClientProvider);
+        chatService = new AiChatServiceImpl(chatClientProvider, rateLimitService);
+        // 默认放行限流，让既有用例专注于对话逻辑；「超限拒绝」的用例单独桩返回 false。
+        when(rateLimitService.tryAcquire(anyLong(), anyString())).thenReturn(true);
     }
 
     @Test
@@ -81,7 +89,7 @@ class AiChatServiceImplTest {
         when(promptSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn(fixedReply);
 
-        String reply = chatService.chat("你好");
+        String reply = chatService.chat(1L, "你好");
 
         assertEquals(fixedReply, reply);
         // 验证系统提示词确实被设置了（人设行为准则的关键参数）
@@ -100,7 +108,7 @@ class AiChatServiceImplTest {
         when(callResponseSpec.content()).thenThrow(new RuntimeException("connection timeout"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> chatService.chat("你好"));
+                () -> chatService.chat(1L, "你好"));
 
         assertEquals(ErrorCode.AI_SERVICE_UNAVAILABLE, exception.getErrorCode());
     }
@@ -112,7 +120,7 @@ class AiChatServiceImplTest {
         when(chatClient.prompt()).thenThrow(new IllegalStateException("bad state"));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> chatService.chat("你好"));
+                () -> chatService.chat(1L, "你好"));
 
         assertEquals(ErrorCode.AI_SERVICE_UNAVAILABLE, exception.getErrorCode());
     }
@@ -124,7 +132,7 @@ class AiChatServiceImplTest {
         when(chatClientProvider.getIfAvailable()).thenReturn(null);
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> chatService.chat("你好"));
+                () -> chatService.chat(1L, "你好"));
 
         assertEquals(ErrorCode.AI_SERVICE_UNAVAILABLE, exception.getErrorCode());
     }
@@ -151,7 +159,7 @@ class AiChatServiceImplTest {
             return null;
         }).when(emitter).complete();
 
-        chatService.chatStream("你好", emitter);
+        chatService.chatStream(1L, "你好", emitter);
 
         // 响应式回调可能是异步的：必须等待 complete 信号，否则断言时数据可能还没到。
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
@@ -185,7 +193,7 @@ class AiChatServiceImplTest {
             return null;
         }).when(emitter).complete();
 
-        chatService.chatStream("你好", emitter);
+        chatService.chatStream(1L, "你好", emitter);
 
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
         // 唯一发送的事件是 error 事件，断言其 data 包含 AI 不可用文案（与同步接口 503 语义一致）
@@ -215,7 +223,7 @@ class AiChatServiceImplTest {
             return null;
         }).when(emitter).complete();
 
-        chatService.chatStream("你好", emitter);
+        chatService.chatStream(1L, "你好", emitter);
 
         assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "流应在超时时间内完成");
         ArgumentCaptor<SseEmitter.SseEventBuilder> captor =
@@ -225,5 +233,50 @@ class AiChatServiceImplTest {
                 .map(d -> String.valueOf(d.getData()))
                 .collect(Collectors.joining());
         assertTrue(sentText.contains(ErrorCode.AI_SERVICE_UNAVAILABLE.getMessage()), "应包含 AI 不可用文案");
+    }
+
+    // ==================== 限流测试 ====================
+
+    @Test
+    void shouldRejectWhenRateLimited() {
+        // 场景：限流器判定超限（tryAcquire 返回 false）→ 直接抛 429，不调用 LLM。
+        // 【为什么要验证「不调用 LLM」？】超限请求若还继续调用大模型，限流就形同虚设
+        // （钱照花）。拒绝必须发生在任何付费调用之前。
+        when(rateLimitService.tryAcquire(1L, "ai_chat")).thenReturn(false);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> chatService.chat(1L, "你好"));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝是同步前置逻辑，不应触发 ChatClient 的任何调用
+        verify(chatClientProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void shouldRejectStreamWhenRateLimited() throws Exception {
+        // 场景：流式接口同样被限流（流式也消耗 token 计费，必须与同步共用配额）。
+        // 注意：此时尚未推流，抛出的 429 仍可被全局异常处理转成 HTTP 状态码。
+        when(rateLimitService.tryAcquire(1L, "ai_chat")).thenReturn(false);
+
+        SseEmitter emitter = spy(new SseEmitter(120_000L));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> chatService.chatStream(1L, "你好", emitter));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝时不发送任何 SSE 事件
+        verify(emitter, never()).send(any(SseEmitter.SseEventBuilder.class));
+        verify(emitter, never()).complete();
+    }
+
+    @Test
+    void shouldUseChatActionKeyForRateLimit() {
+        // 场景：AI 对话应使用独立的 "ai_chat" 动作标识计数（与 RAG/会话对话分开预算）。
+        when(rateLimitService.tryAcquire(1L, "ai_chat")).thenReturn(false);
+
+        assertThrows(BusinessException.class, () -> chatService.chat(1L, "你好"));
+
+        // 限流键必须是 "ai_chat"（不是其他 action），验证动作维度的正确性
+        verify(rateLimitService).tryAcquire(1L, "ai_chat");
     }
 }

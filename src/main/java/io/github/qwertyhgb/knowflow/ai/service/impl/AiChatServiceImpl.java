@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.ai.service.impl;
 
+import io.github.qwertyhgb.knowflow.ai.rate.RateLimitService;
 import io.github.qwertyhgb.knowflow.ai.service.AiChatService;
 import io.github.qwertyhgb.knowflow.common.exception.BusinessException;
 import io.github.qwertyhgb.knowflow.common.exception.ErrorCode;
@@ -63,12 +64,29 @@ public class AiChatServiceImpl implements AiChatService {
     /** Spring AI 自动配置的 ChatClient 的可选提供者（可能不存在，取决于是否配置 api-key）。 */
     private final ObjectProvider<ChatClient> chatClientProvider;
 
-    public AiChatServiceImpl(ObjectProvider<ChatClient> chatClientProvider) {
+    /**
+     * 用户维限流服务：AI 调用是付费外部依赖，必须按用户限流防费用被刷爆。
+     * 为什么不用 AOP 注解：AOP 是 Phase 15 主题（隐式织入对学习者不直观），
+     * 当前显式调用、链路清晰，详见 {@link RateLimitService} 类注释。
+     */
+    private final RateLimitService rateLimitService;
+
+    public AiChatServiceImpl(ObjectProvider<ChatClient> chatClientProvider,
+                             RateLimitService rateLimitService) {
         this.chatClientProvider = chatClientProvider;
+        this.rateLimitService = rateLimitService;
     }
 
     @Override
-    public String chat(String message) {
+    public String chat(Long userId, String message) {
+        // ---- 限流：每次 AI 调用前先取配额 ----
+        // AI 对话按 token 付费，单个用户一分钟内调用超过 20 次直接拒绝（429）——
+        // 这是「成本防线」：防止恶意脚本/死循环把模型调用费刷爆。
+        if (!rateLimitService.tryAcquire(userId, "ai_chat")) {
+            log.warn("event=ai_chat_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // 取出当前可用的 ChatClient；未配置 key 时 getIfAvailable() 返回 null，
         // 此时 AI 能力不可用，返回 503 友好错误而非直接崩掉。
         // 日志只记录异常类型，不记录用户消息原文（白名单规范）。
@@ -100,7 +118,15 @@ public class AiChatServiceImpl implements AiChatService {
     }
 
     @Override
-    public void chatStream(String message, SseEmitter emitter) {
+    public void chatStream(Long userId, String message, SseEmitter emitter) {
+        // 流式同样消耗 token（付费），与同步接口共用同一配额（action=ai_chat）,
+        // 超限直接抛异常——注意这里还没开始推流，SSE 响应头尚未发出，
+        // 异常仍能被 GlobalExceptionHandler 转成正常的 429 HTTP 状态码。
+        if (!rateLimitService.tryAcquire(userId, "ai_chat")) {
+            log.warn("event=ai_chat_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // 复用 chat() 的判空逻辑：未配置 key 时 ChatClient 未装配。
         // 但流式接口「不能」像同步接口那样抛 503 异常——因为 SSE 连接建立后，
         // 响应头（200 + text/event-stream）已经发出、无法再改 HTTP 状态码，

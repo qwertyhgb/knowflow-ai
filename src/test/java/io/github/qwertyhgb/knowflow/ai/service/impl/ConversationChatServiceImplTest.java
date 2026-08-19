@@ -5,6 +5,7 @@ import io.github.qwertyhgb.knowflow.ai.entity.Conversation;
 import io.github.qwertyhgb.knowflow.ai.enums.AiMessageRole;
 import io.github.qwertyhgb.knowflow.ai.mapper.AiMessageMapper;
 import io.github.qwertyhgb.knowflow.ai.mapper.ConversationMapper;
+import io.github.qwertyhgb.knowflow.ai.rate.RateLimitService;
 import io.github.qwertyhgb.knowflow.ai.service.ConversationChatService;
 import io.github.qwertyhgb.knowflow.ai.vo.ConversationChatVO;
 import io.github.qwertyhgb.knowflow.common.exception.BusinessException;
@@ -34,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -75,6 +77,10 @@ class ConversationChatServiceImplTest {
     @Mock
     private io.github.qwertyhgb.knowflow.ai.service.SemanticSearchService semanticSearchService;
 
+    /** 用户维限流服务 mock：既有用例默认放行，限流触发由专用用例覆盖。 */
+    @Mock
+    private RateLimitService rateLimitService;
+
     private ConversationChatService chatService;
 
     private static final Instant FIXED_TIME = Instant.parse("2026-08-18T08:00:00Z");
@@ -85,7 +91,10 @@ class ConversationChatServiceImplTest {
                 conversationMapper, aiMessageMapper, chatClientProvider,
                 semanticSearchService,
                 new tools.jackson.databind.json.JsonMapper(),
-                Clock.fixed(FIXED_TIME, ZoneOffset.UTC));
+                Clock.fixed(FIXED_TIME, ZoneOffset.UTC),
+                rateLimitService);
+        // 默认放行限流，让既有用例专注于会话对话逻辑；「超限拒绝」的用例单独桩返回 false。
+        when(rateLimitService.tryAcquire(anyLong(), anyString())).thenReturn(true);
     }
 
     /** 构造 ChatResponse（含 usage），模拟 LLM 正常返回。 */
@@ -571,5 +580,65 @@ class ConversationChatServiceImplTest {
 
         // 4. 不调用 LLM（不会调用 prompt）
         verify(chatClient, never()).prompt();
+    }
+
+    // ==================== 限流测试 ====================
+
+    @Test
+    void shouldRejectChatWhenRateLimited() {
+        // 场景：会话内对话被限流（tryAcquire 返回 false）→ 429。
+        // 限流在归属校验之前执行：超限请求连数据库查询都不做，直接拒绝（省去无效 IO）。
+        when(rateLimitService.tryAcquire(1L, "ai_conversation")).thenReturn(false);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> chatService.chat(1L, 1L, "你好"));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝时不应触发会话归属查询（skip bookkeeping for already-rejected requests）
+        verify(conversationMapper, never()).selectById(any(Long.class));
+        verify(aiMessageMapper, never()).insert(any(AiMessage.class));
+    }
+
+    @Test
+    void shouldRejectRagChatWhenRateLimited() {
+        // 场景：会话内 RAG 超限 → 429（RAG 同样调用付费 LLM，必须与普通对话共用配额）
+        when(rateLimitService.tryAcquire(1L, "ai_conversation")).thenReturn(false);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> chatService.ragChat(1L, 1L, "缓存方案是什么", 5, 0.3));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝时不触发检索（不花 embedding 成本）
+        verify(semanticSearchService, never()).search(anyString(), any(Integer.class));
+        verify(aiMessageMapper, never()).insert(any(AiMessage.class));
+    }
+
+    @Test
+    void shouldRejectRagChatStreamWhenRateLimited() {
+        // 场景：会话内流式 RAG 超限 → 同步抛 429（尚未推流，SSE 头未发出）。
+        // 注意：这里的 429 是「抛异常」而不是 error 事件——与归属于校验失败的处理不同，
+        // 因为限流发生在所有异步/推流动作之前，异常仍能被全局异常处理转成 HTTP 状态码。
+        when(rateLimitService.tryAcquire(1L, "ai_conversation")).thenReturn(false);
+
+        org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter =
+                org.mockito.Mockito.mock(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.class);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> chatService.ragChatStream(1L, 1L, "缓存方案是什么", 5, 0.3, emitter));
+
+        assertEquals(ErrorCode.RATE_LIMITED, exception.getErrorCode());
+        // 限流拒绝时不落任何消息、不查询会话
+        verify(aiMessageMapper, never()).insert(any(AiMessage.class));
+        verify(conversationMapper, never()).selectById(any(Long.class));
+    }
+
+    @Test
+    void shouldUseConversationActionKeyForRateLimit() {
+        // 场景：会话内对话（chat/ragChat/ragChatStream 三者）共用 "ai_conversation" 配额，
+        // 防止用户换个入口绕过限流
+        when(rateLimitService.tryAcquire(1L, "ai_conversation")).thenReturn(false);
+
+        assertThrows(BusinessException.class, () -> chatService.chat(1L, 1L, "你好"));
+        verify(rateLimitService).tryAcquire(1L, "ai_conversation");
     }
 }

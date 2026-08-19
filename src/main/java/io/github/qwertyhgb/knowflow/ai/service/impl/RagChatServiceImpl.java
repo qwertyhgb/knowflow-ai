@@ -1,5 +1,6 @@
 package io.github.qwertyhgb.knowflow.ai.service.impl;
 
+import io.github.qwertyhgb.knowflow.ai.rate.RateLimitService;
 import io.github.qwertyhgb.knowflow.ai.service.RagChatService;
 import io.github.qwertyhgb.knowflow.ai.service.SemanticSearchService;
 import io.github.qwertyhgb.knowflow.ai.vo.RagChatVO;
@@ -81,16 +82,34 @@ public class RagChatServiceImpl implements RagChatService {
      */
     private final JsonMapper jsonMapper;
 
+    /**
+     * 用户维限流服务：RAG 最终会调用付费 LLM（token 计费），与普通 AI 对话一样
+     * 必须按用户限流防费用被刷爆。动作标识用独立的 {@code "ai_rag"}：
+     * 与 {@code "ai_chat"} 分开计数，用户聊 RAG 不消耗普通对话的配额（互不挤占）。
+     */
+    private final RateLimitService rateLimitService;
+
     public RagChatServiceImpl(SemanticSearchService semanticSearchService,
                               ObjectProvider<ChatClient> chatClientProvider,
-                              JsonMapper jsonMapper) {
+                              JsonMapper jsonMapper,
+                              RateLimitService rateLimitService) {
         this.semanticSearchService = semanticSearchService;
         this.chatClientProvider = chatClientProvider;
         this.jsonMapper = jsonMapper;
+        this.rateLimitService = rateLimitService;
     }
 
     @Override
-    public RagChatVO chat(String question, int topK, double scoreThreshold) {
+    public RagChatVO chat(Long userId, String question, int topK, double scoreThreshold) {
+        // ---- 限流：RAG 同付费（LLM + embedding 检索），与普通对话一视同仁 ----
+        // 【为什么限流必须按用户维度？】计费对象是外部 token 消耗，恶意脚本只需要刷一个
+        // 账号就能打爆账单；按用户维度设置硬上限后，单个用户「耗尽配额即停」，费用可控。
+        // tryAcquire 返回 false 表示该用户一分钟内已调用超 20 次 → 429 拒绝（成本防线）。
+        if (!rateLimitService.tryAcquire(userId, "ai_rag")) {
+            log.warn("event=rag_chat_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // 与 AiChatServiceImpl 一致的判空：未配置 key 时 ChatClient 未装配，返回 503
         ChatClient chatClient = chatClientProvider.getIfAvailable();
         if (chatClient == null) {
@@ -140,7 +159,15 @@ public class RagChatServiceImpl implements RagChatService {
     }
 
     @Override
-    public void chatStream(String question, int topK, double scoreThreshold, SseEmitter emitter) {
+    public void chatStream(Long userId, String question, int topK, double scoreThreshold, SseEmitter emitter) {
+        // ---- 限流：流式同样消耗 token（付费），必须与同步接口一起限 ----
+        // 注意：这里还没开始推流、SSE 响应头尚未发出，因此抛出的 429 仍然能被
+        // GlobalExceptionHandler 转成正常的 HTTP 状态码返回（而不是 error 事件）。
+        if (!rateLimitService.tryAcquire(userId, "ai_rag")) {
+            log.warn("event=rag_chat_stream_rate_limited userId={}", userId);
+            throw new BusinessException(ErrorCode.RATE_LIMITED);
+        }
+
         // 与 AiChatServiceImpl.chatStream 一致：SSE 连接建立后无法改 HTTP 状态码，
         // 所以 ChatClient 未装配时只能发 error 事件（而不是抛 503）。
         ChatClient chatClient = chatClientProvider.getIfAvailable();
