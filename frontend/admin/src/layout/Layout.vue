@@ -9,6 +9,7 @@ import {
   Document,
   Search,
   ChatDotRound,
+  Tickets,
   ArrowDown,
   SwitchButton,
   Bell,
@@ -59,6 +60,9 @@ const menus: MenuItem[] = [
   { index: 'knowledge', title: '知识库', icon: Collection, path: '/knowledge-bases', real: true },
   { index: 'document', title: '文档', icon: Document, real: false },
   { index: 'search', title: '搜索', icon: Search, path: '/search', real: true },
+  // 工单：企业作用域，需选定企业后使用。index 取 'tickets' 与路径第一段一致，
+  // 保证顶部栏标题「工单」与菜单高亮能正确匹配（activeMenu 按路径首段推导）。
+  { index: 'tickets', title: '工单', icon: Tickets, path: '/tickets', real: true },
   // AI 助手：真实路由项，点击跳转 /ai-chat。放在搜索之后作为功能入口。
   { index: 'ai-chat', title: 'AI 助手', icon: ChatDotRound, path: '/ai-chat', real: true },
 ]

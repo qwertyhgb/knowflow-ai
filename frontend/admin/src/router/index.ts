@@ -9,6 +9,8 @@ import KnowledgeBaseView from '../views/KnowledgeBaseView.vue'
 import KnowledgeBaseDetailView from '../views/KnowledgeBaseDetailView.vue'
 import SearchView from '../views/SearchView.vue'
 import AiChatView from '../views/AiChatView.vue'
+import TicketView from '../views/TicketView.vue'
+import TicketDetailView from '../views/TicketDetailView.vue'
 import { useUserStore } from '../stores/user'
 
 /**
@@ -82,6 +84,18 @@ const router = createRouter({
           path: 'ai-chat',
           name: 'aiChat',
           component: AiChatView,
+        },
+        {
+          // 我的工单列表：企业作用域，需选定企业后使用，工单从属于当前企业。
+          path: 'tickets',
+          name: 'tickets',
+          component: TicketView,
+        },
+        {
+          // 工单详情：路由参数 ticketId，从属于当前企业（企业上下文由拦截器附加）。
+          path: 'tickets/:ticketId',
+          name: 'ticketDetail',
+          component: TicketDetailView,
         },
       ],
     },

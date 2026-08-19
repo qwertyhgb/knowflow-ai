@@ -174,10 +174,28 @@ public enum ErrorCode {
      */
     AI_SERVICE_UNAVAILABLE("AI_SERVICE_UNAVAILABLE", "AI 服务暂时不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE),
 
-    /** AI 会话不存在，或当前用户无权访问该会话，固定 404。
-     * 会话是用户级资源，访问控制按「只能操作自己的会话」执行：他人会话与不存在的
-     * 会话统一按 404 处理——不区分「不存在」与「无权访问」，避免泄露他人会话存在性。 */
-    CONVERSATION_NOT_FOUND("CONVERSATION_NOT_FOUND", "会话不存在", HttpStatus.NOT_FOUND);
+    /** AI 会话不存在,或当前用户无权访问该会话,固定 404。
+     * 会话是用户级资源,访问控制按「只能操作自己的会话」执行:他人会话与不存在的
+     * 会话统一按 404 处理——不区分「不存在」与「无权访问」,避免泄露他人会话存在性。 */
+    CONVERSATION_NOT_FOUND("CONVERSATION_NOT_FOUND", "会话不存在", HttpStatus.NOT_FOUND),
+
+    /** 工单不存在、不属于当前企业,或当前用户无权访问,固定 404。
+     * 与 CONVERSATION_NOT_FOUND 同一防枚举思路:工单不存在、他人工单、跨企业工单
+     * 统一按 404 处理——不区分「不存在」与「无权访问」,避免泄露他人工单存在性
+     * (知道 ticketId 不等于有权访问它)。 */
+    TICKET_NOT_FOUND("TICKET_NOT_FOUND", "工单不存在", HttpStatus.NOT_FOUND),
+
+    /** 工单状态流转不合法(跳变、回退或在当前状态下不允许该操作),固定 409。
+     * 【为什么 409 而非 400?】请求参数本身是合法的(目标状态存在、格式正确),
+     * 失败的原因是工单「当前状态」与「目标操作」冲突——这是资源当前状态与
+     * 请求意图的冲突(CONFLICT),与 KNOWLEDGE_BASE_MEMBER_ALREADY_EXISTS 等
+     * 冲突语义一致;400 会误导调用方以为是请求格式问题。 */
+    TICKET_INVALID_TRANSITION("TICKET_INVALID_TRANSITION", "当前状态不允许该操作", HttpStatus.CONFLICT),
+
+    /** 操作要求工单已有处理人(客服),但工单尚未分配(assignee 为 null),固定 400。
+     * 属防御性错误码:正常流程下状态机保证进入处理中/解决前必有分配动作,
+     * 此错误码用于拦截数据漂移(如手工改库导致的非 OPEN 状态但无 assignee)。 */
+    TICKET_NOT_ASSIGNED("TICKET_NOT_ASSIGNED", "工单尚未分配客服", HttpStatus.BAD_REQUEST);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;
