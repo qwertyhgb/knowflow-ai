@@ -60,6 +60,15 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
+        <!-- Spring AOP：面向切面编程支持（@Aspect / @Around 注解与切面织入）——操作日志切面依赖。
+             说明：Spring Boot 4 起把 AOP starter 从 spring-boot-starter-aop 改名为
+             spring-boot-starter-aspectj（并升级为 Spring AOP over AspectJ）。默认的
+             spring-boot-starter-webmvc 并不包含 AOP，必须显式引入本 starter
+             （它传递引入 aspectjweaver，提供 @Aspect 注解与运行期织入）。版本由 Boot BOM 管理。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aspectj</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>

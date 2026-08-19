@@ -2,6 +2,7 @@ package io.github.qwertyhgb.knowflow.user.controller;
 
 import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
 import io.github.qwertyhgb.knowflow.auth.token.BearerTokenExtractor;
+import io.github.qwertyhgb.knowflow.audit.annotation.OperationLog;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserChangePasswordRequest;
 import io.github.qwertyhgb.knowflow.user.dto.request.UserLoginRequest;
@@ -44,8 +45,12 @@ public class UserController {
 
     /**
      * 用户登录。
+     *
+     * <p>登录是最高频的审计点：成功失败都记录。登录接口未认证（无登录态），
+     * 审计记录的 userId 为 null，表示「未登录场景的操作」。</p>
      */
     @PostMapping("/login")
+    @OperationLog("用户登录")
     public Result<UserLoginVO> login(@Valid @RequestBody UserLoginRequest request) {
         return Result.success(userService.login(request));
     }
@@ -75,6 +80,7 @@ public class UserController {
      * 修改当前登录用户密码。
      */
     @PutMapping("/me/password")
+    @OperationLog("修改密码")
     public Result<Void> changePassword(Authentication authentication,
                                        @Valid @RequestBody UserChangePasswordRequest request) {
         // 认证主体为 EnterpriseUser（Token 认证建立）；/api/users/** 不属于企业作用域，企业上下文字段为 null。

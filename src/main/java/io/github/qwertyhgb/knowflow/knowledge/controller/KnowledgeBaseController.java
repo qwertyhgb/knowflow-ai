@@ -1,6 +1,7 @@
 package io.github.qwertyhgb.knowflow.knowledge.controller;
 
 import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
+import io.github.qwertyhgb.knowflow.audit.annotation.OperationLog;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import io.github.qwertyhgb.knowflow.knowledge.dto.request.KnowledgeBaseCreateRequest;
 import io.github.qwertyhgb.knowflow.knowledge.dto.request.KnowledgeBaseMemberAddRequest;
@@ -63,6 +64,7 @@ public class KnowledgeBaseController {
      * 返回状态码沿用现有创建接口约定（成功 200，通过 {@link Result} 包装）。</p>
      */
     @PostMapping
+    @OperationLog("创建知识库")
     public Result<KnowledgeBaseVO> createKnowledgeBase(Authentication authentication,
                                                        @PathVariable Long enterpriseId,
                                                        @Valid @RequestBody KnowledgeBaseCreateRequest request) {
@@ -172,6 +174,7 @@ public class KnowledgeBaseController {
      * <p><strong>权限：</strong>需知识库 ADMIN 或企业 OWNER/ADMIN（由 Service 按资源级校验）。</p>
      */
     @DeleteMapping("/{knowledgeBaseId}")
+    @OperationLog("删除知识库")
     public Result<Void> deleteKnowledgeBase(Authentication authentication,
                                             @PathVariable Long enterpriseId,
                                             @PathVariable Long knowledgeBaseId) {

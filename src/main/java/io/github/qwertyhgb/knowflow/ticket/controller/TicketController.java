@@ -1,6 +1,7 @@
 package io.github.qwertyhgb.knowflow.ticket.controller;
 
 import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
+import io.github.qwertyhgb.knowflow.audit.annotation.OperationLog;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import io.github.qwertyhgb.knowflow.ticket.dto.request.TicketAssignRequest;
 import io.github.qwertyhgb.knowflow.ticket.dto.request.TicketCreateRequest;
@@ -61,6 +62,7 @@ public class TicketController {
      * @param request        创建请求(title/description/category/priority)
      */
     @PostMapping
+    @OperationLog("创建工单")
     public Result<TicketDetailVO> createTicket(Authentication authentication,
                                                @PathVariable Long enterpriseId,
                                                @Valid @RequestBody TicketCreateRequest request) {
@@ -103,6 +105,7 @@ public class TicketController {
      * 与「分配已完成」的幂等语义不冲突)。</p>
      */
     @PutMapping("/{ticketId}/assign")
+    @OperationLog("分配工单")
     public Result<TicketVO> assignTicket(Authentication authentication,
                                          @PathVariable Long enterpriseId,
                                          @PathVariable Long ticketId,
@@ -137,6 +140,7 @@ public class TicketController {
      * 无权操作返回 403。</p>
      */
     @PutMapping("/{ticketId}/status")
+    @OperationLog("更新工单状态")
     public Result<TicketVO> updateTicketStatus(Authentication authentication,
                                                @PathVariable Long enterpriseId,
                                                @PathVariable Long ticketId,

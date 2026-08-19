@@ -1,6 +1,7 @@
 package io.github.qwertyhgb.knowflow.enterprise.controller;
 
 import io.github.qwertyhgb.knowflow.auth.context.EnterpriseUser;
+import io.github.qwertyhgb.knowflow.audit.annotation.OperationLog;
 import io.github.qwertyhgb.knowflow.common.response.Result;
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseCreateRequest;
 import io.github.qwertyhgb.knowflow.enterprise.dto.request.EnterpriseMemberStatusUpdateRequest;
@@ -46,6 +47,7 @@ public class EnterpriseController {
      * 创建企业：当前用户自动成为该企业的所有者成员。
      */
     @PostMapping
+    @OperationLog("创建企业")
     public Result<EnterpriseVO> createEnterprise(Authentication authentication,
                                                  @Valid @RequestBody EnterpriseCreateRequest request) {
         Long userId = ((EnterpriseUser) authentication.getPrincipal()).userId();
