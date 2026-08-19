@@ -172,7 +172,12 @@ public enum ErrorCode {
      * 前端可据此判断：503 属于可重试的临时故障（稍后重试即可），
      * 而 500 往往需要后端排查，重试无意义。
      */
-    AI_SERVICE_UNAVAILABLE("AI_SERVICE_UNAVAILABLE", "AI 服务暂时不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE);
+    AI_SERVICE_UNAVAILABLE("AI_SERVICE_UNAVAILABLE", "AI 服务暂时不可用，请稍后重试", HttpStatus.SERVICE_UNAVAILABLE),
+
+    /** AI 会话不存在，或当前用户无权访问该会话，固定 404。
+     * 会话是用户级资源，访问控制按「只能操作自己的会话」执行：他人会话与不存在的
+     * 会话统一按 404 处理——不区分「不存在」与「无权访问」，避免泄露他人会话存在性。 */
+    CONVERSATION_NOT_FOUND("CONVERSATION_NOT_FOUND", "会话不存在", HttpStatus.NOT_FOUND);
 
     /** 稳定、机器可读的错误码，前端分支与日志检索的依据。 */
     private final String code;
